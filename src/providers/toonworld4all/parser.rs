@@ -807,8 +807,14 @@ mod tests {
             ),
         );
         assert_eq!(releases.len(), 2);
-        assert_eq!((releases[0].season, releases[0].episode), (Some(2), Some(3)));
-        assert_eq!((releases[1].season, releases[1].episode), (Some(2), Some(4)));
+        assert_eq!(
+            (releases[0].season, releases[0].episode),
+            (Some(2), Some(3))
+        );
+        assert_eq!(
+            (releases[1].season, releases[1].episode),
+            (Some(2), Some(4))
+        );
     }
 
     #[test]
