@@ -38,16 +38,22 @@ pub(super) fn safe_url(raw: &str) -> Result<Url, ProviderError> {
     let host = url
         .host()
         .ok_or_else(|| ProviderError::Parsing("Source URL has no host".into()))?;
-    let is_local = match host {
-        Host::Ipv4(ip) => !public_ip(IpAddr::V4(ip)),
-        Host::Ipv6(ip) => !public_ip(IpAddr::V6(ip)),
+    let (is_local, is_loopback_ip) = match host {
+        Host::Ipv4(ip) => (!public_ip(IpAddr::V4(ip)), ip.is_loopback()),
+        Host::Ipv6(ip) => (!public_ip(IpAddr::V6(ip)), ip.is_loopback()),
         Host::Domain(host) => {
             let host = host.trim_end_matches('.');
-            host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
+            (
+                host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local"),
+                false,
+            )
         }
     };
-    if (url.scheme() != "https" && !(cfg!(test) && url.scheme() == "http" && is_local))
-        || (is_local && !cfg!(test))
+    // Only loopback IPs used by the mocked HTTP servers are permitted in tests.
+    // Do not exempt arbitrary local hosts or private subnets from URL validation.
+    let test_loopback = cfg!(test) && is_loopback_ip;
+    if (url.scheme() != "https" && !(test_loopback && url.scheme() == "http"))
+        || (is_local && !test_loopback)
         || !url.username().is_empty()
         || url.password().is_some()
     {
@@ -625,8 +631,12 @@ mod tests {
         }
         assert!(safe_url("http://example.com/file.mkv").is_err());
         assert!(safe_url("https://127.0.0.1/admin").is_ok()); // test-only mock URLs
+        assert!(safe_url("http://127.0.0.1:1234/mock").is_ok());
         assert!(safe_url("file:///etc/passwd").is_err());
         assert!(safe_url("https://admin.local/secrets").is_err());
+        assert!(safe_url("http://admin.local/secrets").is_err());
+        assert!(safe_url("https://192.168.0.1/secrets").is_err());
+        assert!(safe_url("https://localhost/secrets").is_err());
         assert!(!public_ip("::ffff:127.0.0.1".parse().unwrap()));
         assert!(check_page("<title>Just a moment...</title>Cloudflare").is_err());
         assert!(check_page("I'm Not a Robot. Click here to continue").is_err());
@@ -699,7 +709,7 @@ mod tests {
         let task = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 512];
-            stream.read(&mut request).await.unwrap();
+            assert!(stream.read(&mut request).await.unwrap() > 0);
             let json = r#"{"UHDMovies":"https://uhdmovies.example/","moviesmod":"https://moviesmod.example/"}"#;
             let reply = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
@@ -735,7 +745,7 @@ mod tests {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut buf = [0; 1024];
-                stream.read(&mut buf).await.unwrap();
+                assert!(stream.read(&mut buf).await.unwrap() > 0);
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -770,7 +780,7 @@ mod tests {
             for base in [old_for_list, new_for_list] {
                 let (mut stream, _) = list_listener.accept().await.unwrap();
                 let mut buf = [0; 1024];
-                stream.read(&mut buf).await.unwrap();
+                assert!(stream.read(&mut buf).await.unwrap() > 0);
                 let body = serde_json::json!({"moviesmod": base}).to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -782,13 +792,13 @@ mod tests {
         let old_task = tokio::spawn(async move {
             let (mut stream, _) = old_listener.accept().await.unwrap();
             let mut buf = [0; 1024];
-            stream.read(&mut buf).await.unwrap();
+            assert!(stream.read(&mut buf).await.unwrap() > 0);
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
         });
         let new_task = tokio::spawn(async move {
             let (mut stream, _) = new_listener.accept().await.unwrap();
             let mut buf = [0; 1024];
-            stream.read(&mut buf).await.unwrap();
+            assert!(stream.read(&mut buf).await.unwrap() > 0);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await
