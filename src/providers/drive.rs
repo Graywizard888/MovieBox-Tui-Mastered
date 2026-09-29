@@ -481,11 +481,13 @@ async fn preflight(
             "Not a downloadable media file".into(),
         ));
     }
-    let mut request = client.get(url.clone()).header(RANGE, "bytes=0-0");
+    // Ask for a short prefix so ambiguous content types can be checked without loading
+    // a full file. Some hosts serve verification HTML at URLs ending in `.mkv`.
+    let mut request = client.get(url.clone()).header(RANGE, "bytes=0-511");
     for (name, value) in &mirror.headers {
         request = request.header(name.as_str(), value.as_str());
     }
-    let response = request
+    let mut response = request
         .send()
         .await
         .map_err(site::network_error)?
@@ -524,6 +526,31 @@ async fn preflight(
         return Err(ProviderError::Unavailable(
             "Mirror returned a web page, not video".into(),
         ));
+    }
+    // A media-looking URL or generic download MIME is not enough: some expired hosts
+    // return an HTML/JSON verification page under the same URL and content type.
+    if !mime.starts_with("video/") && !mime.contains("mpegurl") {
+        let prefix = response
+            .chunk()
+            .await
+            .map_err(site::network_error)?
+            .ok_or_else(|| ProviderError::Unavailable("Mirror returned no media data".into()))?;
+        let preview = String::from_utf8_lossy(&prefix[..prefix.len().min(512)]);
+        site::check_page(&preview)?;
+        let start = preview
+            .trim_start_matches('\u{feff}')
+            .trim_start()
+            .to_ascii_lowercase();
+        let dash_manifest = final_url.path().to_ascii_lowercase().ends_with(".mpd")
+            && (start.starts_with("<?xml") || start.starts_with("<mpd") || start == "<");
+        if (start.starts_with('<') && !dash_manifest)
+            || start.starts_with('{')
+            || start.starts_with('[')
+        {
+            return Err(ProviderError::Unavailable(
+                "Mirror returned a web page, not video".into(),
+            ));
+        }
     }
     if !mime.starts_with("video/")
         && !mime.contains("octet-stream")
@@ -774,6 +801,72 @@ mod tests {
             ProviderKind::Moviesmod,
             ResolutionIntent::Download,
         ));
+    }
+
+    #[tokio::test]
+    async fn generic_media_responses_cannot_disguise_html_as_video() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                let count = stream.read(&mut request).await.unwrap();
+                let line = String::from_utf8_lossy(&request[..count]);
+                let path = line.split_whitespace().nth(1).unwrap();
+                let (mime, body): (&str, &[u8]) = match path {
+                    "/bad.mkv" => ("", b"<html>Not a video</html>"),
+                    "/generic.mkv" => (
+                        "Content-Type: application/octet-stream\r\n",
+                        b"<html>I'm Not a Robot. Click here to continue</html>",
+                    ),
+                    "/good.mkv" => (
+                        "Content-Type: application/octet-stream\r\n",
+                        b"\x1a\x45\xdf\xa3",
+                    ),
+                    "/manifest.mpd" => (
+                        "Content-Type: application/octet-stream\r\n",
+                        b"<?xml version='1.0'?><MPD></MPD>",
+                    ),
+                    _ => panic!("Unexpected mock request: {path}"),
+                };
+                let headers = format!(
+                    "HTTP/1.1 206 Partial Content\r\n{mime}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        });
+        let client = site::browser_client().unwrap();
+        let mirror = SourceMirror {
+            label: "Mirror".into(),
+            resolver_url: format!("{base}/bad.mkv"),
+            headers: vec![],
+            direct_file: false,
+        };
+        let bad = Url::parse(&format!("{base}/bad.mkv")).unwrap();
+        assert!(
+            preflight(&client, &bad, &mirror, ResolutionIntent::Playback)
+                .await
+                .is_err()
+        );
+        let generic = Url::parse(&format!("{base}/generic.mkv")).unwrap();
+        let gate = preflight(&client, &generic, &mirror, ResolutionIntent::Download)
+            .await
+            .unwrap_err();
+        assert!(site::is_browser_verification(&gate));
+        for path in ["good.mkv", "manifest.mpd"] {
+            let url = Url::parse(&format!("{base}/{path}")).unwrap();
+            assert_eq!(
+                preflight(&client, &url, &mirror, ResolutionIntent::Playback)
+                    .await
+                    .unwrap(),
+                url
+            );
+        }
+        server.await.unwrap();
     }
 
     #[tokio::test]
