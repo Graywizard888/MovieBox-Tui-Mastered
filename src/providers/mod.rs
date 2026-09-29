@@ -1,10 +1,15 @@
 pub mod addons;
 pub mod bdix;
 pub mod dramachi;
+mod drive;
 pub mod fourkhdhub;
 pub mod models;
 pub mod moviebox;
+pub mod moviesmod;
+mod site;
+pub mod toonworld4all;
 pub mod tv;
+pub mod uhdmovies;
 
 pub use tv as m3u;
 

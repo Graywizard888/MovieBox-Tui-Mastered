@@ -532,6 +532,9 @@ impl App {
                 }
                 self.state.is_resolving_playback = true;
                 if self.current_subject_provider() == ProviderKind::FourKHdHub
+                    || self.current_subject_provider() == ProviderKind::UhdMovies
+                    || self.current_subject_provider() == ProviderKind::Moviesmod
+                    || self.current_subject_provider() == ProviderKind::ToonWorld4All
                     || self.current_subject_provider() == ProviderKind::Addons
                     || self.current_subject_provider() == ProviderKind::Dramachi
                     || self.current_subject_provider().is_bdix()
@@ -555,6 +558,62 @@ impl App {
                                 release.provider.label()
                             ),
                         );
+                        if matches!(
+                            release.provider,
+                            ProviderKind::UhdMovies
+                                | ProviderKind::Moviesmod
+                                | ProviderKind::ToonWorld4All
+                        ) {
+                            let service = self.service.clone();
+                            let sender = self.action_sender.clone();
+                            tokio::spawn(async move {
+                                let result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    service.resolve_wordpress_release(
+                                        &release,
+                                        crate::providers::ResolutionIntent::Download,
+                                    ),
+                                )
+                                .await;
+                                match result {
+                                    Ok(Ok(source)) => {
+                                        let max_height = release
+                                            .quality
+                                            .as_ref()
+                                            .map(|_| release.resolution_u64());
+                                        sender
+                                            .send(Action::StartDownload(
+                                                subtitle_url,
+                                                Some(source.url),
+                                                source.headers,
+                                                max_height,
+                                            ))
+                                            .ok();
+                                    }
+                                    Ok(Err(error)) => {
+                                        log::error!(
+                                            "{} download resolve failed: {error}",
+                                            release.provider.label()
+                                        );
+                                        sender
+                                            .send(Action::SetStatus(format!(
+                                                "Error: {}",
+                                                error.user_message(release.provider),
+                                            )))
+                                            .ok();
+                                    }
+                                    Err(_) => {
+                                        sender
+                                            .send(Action::SetStatus(format!(
+                                                "Error: {}: Link resolution timed out.",
+                                                release.provider.label(),
+                                            )))
+                                            .ok();
+                                    }
+                                }
+                            });
+                            return None;
+                        }
                         let client = if release.provider == ProviderKind::Addons
                             || release.provider == ProviderKind::Dramachi
                             || release.provider == ProviderKind::BdixCircleFtp

@@ -16,12 +16,21 @@ pub enum ProviderKind {
     Addons,
     #[serde(rename = "dramachi")]
     Dramachi,
+    #[serde(rename = "uhdmovies", alias = "uhd_movies")]
+    UhdMovies,
+    #[serde(rename = "moviesmod")]
+    Moviesmod,
+    #[serde(rename = "toonworld4all", alias = "toon_world4all")]
+    ToonWorld4All,
 }
 
 impl ProviderKind {
-    pub const ENABLED: [Self; 5] = [
+    pub const ENABLED: [Self; 8] = [
         Self::MovieBox,
         Self::FourKHdHub,
+        Self::UhdMovies,
+        Self::Moviesmod,
+        Self::ToonWorld4All,
         Self::Dramachi,
         Self::BdixCircleFtp,
         Self::BdixDhakaFlix,
@@ -35,6 +44,9 @@ impl ProviderKind {
             Self::BdixDhakaFlix => "bdix_dhakaflix",
             Self::Addons => "addons",
             Self::Dramachi => "dramachi",
+            Self::UhdMovies => "uhdmovies",
+            Self::Moviesmod => "moviesmod",
+            Self::ToonWorld4All => "toonworld4all",
         }
     }
 
@@ -46,6 +58,9 @@ impl ProviderKind {
             Self::BdixDhakaFlix => "DhakaFlix (BDIX)",
             Self::Addons => "Addons",
             Self::Dramachi => "Dramachi",
+            Self::UhdMovies => "UHDMovies",
+            Self::Moviesmod => "Moviesmod",
+            Self::ToonWorld4All => "ToonWorld4All",
         }
     }
 
@@ -57,6 +72,9 @@ impl ProviderKind {
             "bdix_dhakaflix" | "dhakaflix (bdix)" => Some(Self::BdixDhakaFlix),
             "addons" | "addon" => Some(Self::Addons),
             "dramachi" => Some(Self::Dramachi),
+            "uhdmovies" | "uhd_movies" => Some(Self::UhdMovies),
+            "moviesmod" => Some(Self::Moviesmod),
+            "toonworld4all" | "toon_world4all" => Some(Self::ToonWorld4All),
             _ => None,
         }
     }
@@ -249,6 +267,14 @@ pub struct Release {
     pub resource_id: Option<String>,
 }
 impl Release {
+    fn unknown_resolution(&self) -> bool {
+        self.quality.is_none()
+            && matches!(
+                self.provider,
+                ProviderKind::UhdMovies | ProviderKind::Moviesmod | ProviderKind::ToonWorld4All
+            )
+    }
+
     pub fn is_multi_resolution(&self) -> bool {
         self.quality
             .as_deref()
@@ -256,6 +282,9 @@ impl Release {
     }
 
     pub fn resolution_u64(&self) -> u64 {
+        if self.unknown_resolution() {
+            return 0;
+        }
         self.quality
             .as_deref()
             .and_then(|q| {
@@ -269,7 +298,9 @@ impl Release {
     }
 
     pub fn resolution_i64(&self) -> i64 {
-        if self.is_multi_resolution() {
+        if self.unknown_resolution() {
+            -2 // No stated quality: do not invent a 1080p release.
+        } else if self.is_multi_resolution() {
             -1
         } else {
             self.resolution_u64() as i64
@@ -285,6 +316,9 @@ impl Release {
                 ProviderKind::BdixDhakaFlix => "DhakaFlix",
                 ProviderKind::Addons => "Addon",
                 ProviderKind::Dramachi => "Dramachi",
+                ProviderKind::UhdMovies => "UHDMovies",
+                ProviderKind::Moviesmod => "Moviesmod",
+                ProviderKind::ToonWorld4All => "ToonWorld4All",
                 ProviderKind::MovieBox => "Direct",
             })
     }
@@ -470,6 +504,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wordpress_provider_ids_round_trip() {
+        for (provider, key) in [
+            (ProviderKind::UhdMovies, "uhdmovies"),
+            (ProviderKind::Moviesmod, "moviesmod"),
+            (ProviderKind::ToonWorld4All, "toonworld4all"),
+        ] {
+            assert_eq!(provider.cache_key(), key);
+            assert_eq!(ProviderKind::parse(provider.label()), Some(provider));
+            assert_eq!(
+                serde_json::to_string(&provider).unwrap(),
+                format!("\"{key}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<ProviderKind>(&format!("\"{key}\"")).unwrap(),
+                provider
+            );
+        }
+    }
+
+    #[test]
     fn test_release_resolution_parsing() {
         let make_release = |q: Option<&str>| Release {
             provider: ProviderKind::BdixCircleFtp,
@@ -489,6 +543,16 @@ mod tests {
         assert_eq!(make_release(Some("2160p")).resolution_u64(), 2160);
         assert_eq!(make_release(Some("1080p")).resolution_u64(), 1080);
         assert_eq!(make_release(None).resolution_u64(), 1080);
+        for provider in [
+            ProviderKind::UhdMovies,
+            ProviderKind::Moviesmod,
+            ProviderKind::ToonWorld4All,
+        ] {
+            let mut release = make_release(None);
+            release.provider = provider;
+            assert_eq!(release.resolution_u64(), 0);
+            assert_eq!(release.resolution_i64(), -2);
+        }
     }
 
     #[test]

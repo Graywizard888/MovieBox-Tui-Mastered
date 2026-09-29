@@ -129,7 +129,7 @@ Full documentation at [**mesamirh.github.io/MovieBox-Tui**](https://mesamirh.git
 | :--- | :--- |
 | [Keyboard & Controls](docs/controls.md) | Keybindings, vim navigation, and shortcuts |
 | [Configuration](docs/config.md) | Settings, themes, and environment variables |
-| [Content Providers](docs/providers.md) | Native scrapers (MovieBox, 4KHDHub, Dramachi, BDIX) |
+| [Content Providers](docs/providers.md) | Native scrapers (MovieBox, 4KHDHub, UHDMovies, Moviesmod, ToonWorld4All, Dramachi, BDIX) |
 | [Stremio Addons](docs/addons-mode.md) | Community addon configuration and streaming |
 | [Hardware Players](docs/players.md) | Player detection, launch options, and flags |
 | [Live TV & IPTV](docs/tv-mode.md) | M3U playlist import and channel streaming |

@@ -179,6 +179,9 @@ impl App {
         state.last_update_check = config.last_update_check;
         state.moviebox_enabled = config.moviebox_enabled;
         state.fourkhdhub_enabled = config.fourkhdhub_enabled;
+        state.uhdmovies_enabled = config.uhdmovies_enabled;
+        state.moviesmod_enabled = config.moviesmod_enabled;
+        state.toonworld4all_enabled = config.toonworld4all_enabled;
         state.dramachi_enabled = config.dramachi_enabled;
         state.bdix_circleftp_enabled = config.bdix_circleftp_enabled;
         state.bdix_dhakaflix_enabled = config.bdix_dhakaflix_enabled;
@@ -255,6 +258,15 @@ impl App {
         if service.fourk_client.is_none() {
             log::warn!("4KHDHub client unavailable; provider will be disabled");
         }
+        if service.uhdmovies_client.is_none() {
+            log::warn!("UHDMovies client unavailable; check MOVIEBOX_UHDMOVIES_URL");
+        }
+        if service.moviesmod_client.is_none() {
+            log::warn!("Moviesmod client unavailable; check MOVIEBOX_MOVIESMOD_URL");
+        }
+        if service.toonworld4all_client.is_none() {
+            log::warn!("ToonWorld4All client unavailable; check MOVIEBOX_TOONWORLD4ALL_URL");
+        }
 
         let mut app = Self {
             theme,
@@ -308,6 +320,9 @@ impl App {
             active_theme: self.state.active_theme_kind.clone(),
             moviebox_enabled: self.state.moviebox_enabled,
             fourkhdhub_enabled: self.state.fourkhdhub_enabled,
+            uhdmovies_enabled: self.state.uhdmovies_enabled,
+            moviesmod_enabled: self.state.moviesmod_enabled,
+            toonworld4all_enabled: self.state.toonworld4all_enabled,
             dramachi_enabled: self.state.dramachi_enabled,
             bdix_circleftp_enabled: self.state.bdix_circleftp_enabled,
             bdix_dhakaflix_enabled: self.state.bdix_dhakaflix_enabled,

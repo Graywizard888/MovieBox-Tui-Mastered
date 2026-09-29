@@ -764,6 +764,9 @@ impl App {
                 self.state.last_playback_launch = std::time::Instant::now();
                 self.state.is_resolving_playback = true;
                 if self.current_subject_provider() == ProviderKind::FourKHdHub
+                    || self.current_subject_provider() == ProviderKind::UhdMovies
+                    || self.current_subject_provider() == ProviderKind::Moviesmod
+                    || self.current_subject_provider() == ProviderKind::ToonWorld4All
                     || self.current_subject_provider() == ProviderKind::Addons
                     || self.current_subject_provider() == ProviderKind::Dramachi
                     || self.current_subject_provider().is_bdix()
@@ -792,6 +795,53 @@ impl App {
                             source_label: first_mirror.label.clone(),
                             max_height,
                         };
+                        if matches!(
+                            release.provider,
+                            ProviderKind::UhdMovies
+                                | ProviderKind::Moviesmod
+                                | ProviderKind::ToonWorld4All
+                        ) {
+                            let service = self.service.clone();
+                            let sender = self.action_sender.clone();
+                            tokio::spawn(async move {
+                                let result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    service.resolve_wordpress_release(
+                                        &release,
+                                        crate::providers::ResolutionIntent::Playback,
+                                    ),
+                                )
+                                .await;
+                                match result {
+                                    Ok(Ok(source)) => {
+                                        sender.send(Action::DispatchPlayback(source)).ok();
+                                    }
+                                    Ok(Err(error)) => {
+                                        log::error!(
+                                            "{} playback resolve failed: {error}",
+                                            release.provider.label()
+                                        );
+                                        sender.send(Action::PlayerExited).ok();
+                                        sender
+                                            .send(Action::SetStatus(format!(
+                                                "Error: {}",
+                                                error.user_message(release.provider),
+                                            )))
+                                            .ok();
+                                    }
+                                    Err(_) => {
+                                        sender.send(Action::PlayerExited).ok();
+                                        sender
+                                            .send(Action::SetStatus(format!(
+                                                "Error: {}: Link resolution timed out.",
+                                                release.provider.label(),
+                                            )))
+                                            .ok();
+                                    }
+                                }
+                            });
+                            return None;
+                        }
                         let client = if release.provider == ProviderKind::Addons
                             || release.provider == ProviderKind::Dramachi
                             || release.provider == ProviderKind::BdixCircleFtp

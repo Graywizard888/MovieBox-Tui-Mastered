@@ -8,6 +8,7 @@ use crate::tui::theme::Theme;
 
 pub fn resolution_label(resolution: i64) -> &'static str {
     match resolution {
+        -2 => "?",
         -1 => "Multi",
         2160 | 4320 => "4K",
         1080 => "1080p",
@@ -30,6 +31,7 @@ pub fn resolution_badge_spans<'a>(
     if modal_active {
         if basic_terminal {
             let label = match resolution {
+                -2 => "[?]",
                 -1 => "[Multi]",
                 2160 | 4320 => "[4K]",
                 1080 => "[1080p]",
@@ -46,6 +48,7 @@ pub fn resolution_badge_spans<'a>(
         }
 
         let label = match resolution {
+            -2 => "   ?   ",
             -1 => " Multi ",
             2160 | 4320 => "  4K   ",
             1080 => " 1080p ",
@@ -65,6 +68,7 @@ pub fn resolution_badge_spans<'a>(
 
     if basic_terminal {
         let (label, style) = match resolution {
+            -2 => ("[?]", theme.text_dim),
             -1 => ("[Multi]", theme.lavender.add_modifier(Modifier::BOLD)),
             2160 | 4320 => ("[4K]", theme.rating.add_modifier(Modifier::BOLD)),
             1080 => ("[1080p]", theme.highlight.add_modifier(Modifier::BOLD)),
@@ -79,6 +83,11 @@ pub fn resolution_badge_spans<'a>(
 
     let is_light = theme.is_light;
     let (badge_bg, contrast_fg, label) = match resolution {
+        -2 => (
+            theme.surface2_color(),
+            theme.text_dim.fg.unwrap_or(theme.base),
+            "   ?   ",
+        ),
         -1 => {
             let accent_color = theme.lavender.fg.unwrap_or(theme.base);
             if is_selected {
@@ -188,6 +197,9 @@ pub fn provider_origin_tag(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::MovieBox => "[MovieBox]",
         ProviderKind::FourKHdHub => "[4KHD]",
+        ProviderKind::UhdMovies => "[UHD]",
+        ProviderKind::Moviesmod => "[Moviesmod]",
+        ProviderKind::ToonWorld4All => "[ToonWorld4All]",
         ProviderKind::BdixCircleFtp => "[CircleFTP]",
         ProviderKind::BdixDhakaFlix => "[DhakaFlix]",
         ProviderKind::Addons => "[Addon]",
@@ -210,6 +222,9 @@ pub fn provider_badge_span<'a>(
         let style = match provider {
             ProviderKind::MovieBox => theme.lavender,
             ProviderKind::FourKHdHub => theme.rating,
+            ProviderKind::UhdMovies => theme.flamingo,
+            ProviderKind::Moviesmod => theme.maroon,
+            ProviderKind::ToonWorld4All => theme.sapphire,
             ProviderKind::BdixCircleFtp => theme.teal,
             ProviderKind::BdixDhakaFlix => theme.sapphire,
             ProviderKind::Addons => theme.accent,
@@ -463,6 +478,8 @@ mod tests {
 
         let spans_multi = resolution_badge_spans(-1, &theme, false, false, false);
         assert_eq!(spans_multi[0].content, " Multi ");
+        let unknown = resolution_badge_spans(-2, &theme, false, false, false);
+        assert_eq!(unknown[0].content, "   ?   ");
 
         let basic_4k = resolution_badge_spans(2160, &theme, true, false, false);
         assert_eq!(basic_4k[0].content.trim(), "[4K]");
@@ -480,7 +497,7 @@ mod tests {
         for theme_name in crate::tui::theme::AVAILABLE_THEMES {
             let kind = crate::tui::theme::ThemeKind::parse(theme_name);
             let theme = crate::tui::theme::Theme::from_kind(kind);
-            for res in [-1, 2160, 1080, 720, 480] {
+            for res in [-2, -1, 2160, 1080, 720, 480] {
                 let unselected = resolution_badge_spans(res, &theme, false, false, false);
                 let selected = resolution_badge_spans(res, &theme, false, false, true);
                 assert!(unselected[0].style.bg.is_some());
@@ -501,6 +518,7 @@ mod tests {
 
     #[test]
     fn test_resolution_label() {
+        assert_eq!(resolution_label(-2), "?");
         assert_eq!(resolution_label(-1), "Multi");
         assert_eq!(resolution_label(4320), "4K");
         assert_eq!(resolution_label(2160), "4K");
@@ -545,6 +563,12 @@ mod tests {
         );
         assert_eq!(provider_origin_tag(ProviderKind::Addons), "[Addon]");
         assert_eq!(provider_origin_tag(ProviderKind::Dramachi), "[Dramachi]");
+        assert_eq!(provider_origin_tag(ProviderKind::UhdMovies), "[UHD]");
+        assert_eq!(provider_origin_tag(ProviderKind::Moviesmod), "[Moviesmod]");
+        assert_eq!(
+            provider_origin_tag(ProviderKind::ToonWorld4All),
+            "[ToonWorld4All]"
+        );
     }
 
     #[test]

@@ -87,6 +87,6 @@ jobs:
         env:
           MOVIEBOX_CONFIG_DIR: ${{ runner.temp }}/mb_config
           MOVIEBOX_DATA_DIR: ${{ runner.temp }}/mb_data
-        run: cargo nextest run --all-features --locked
+        run: cargo nextest run --all-features --locked --no-fail-fast
       - name: Smoke-test binary startup
         run: cargo run --all-features --locked -- --version

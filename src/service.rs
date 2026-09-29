@@ -8,11 +8,17 @@ use crate::providers::bdix::dhakaflix::client::DhakaFlixClient;
 use crate::providers::fourkhdhub::FourKHdHubClient;
 use crate::providers::models::{CatalogItem, MediaDetails, ProviderError, ProviderKind};
 use crate::providers::moviebox::client::MovieBoxClient;
+use crate::providers::moviesmod::MoviesmodClient;
+use crate::providers::toonworld4all::ToonWorld4AllClient;
+use crate::providers::uhdmovies::UhdMoviesClient;
 
 #[derive(Clone)]
 pub struct MovieBoxService {
     pub client: MovieBoxClient,
     pub fourk_client: Option<FourKHdHubClient>,
+    pub uhdmovies_client: Option<UhdMoviesClient>,
+    pub moviesmod_client: Option<MoviesmodClient>,
+    pub toonworld4all_client: Option<ToonWorld4AllClient>,
     pub circleftp_client: CircleFtpClient,
     pub dhakaflix_client: DhakaFlixClient,
     pub addon_client: crate::providers::addons::AddonClient,
@@ -36,6 +42,9 @@ impl MovieBoxService {
         Self {
             client: MovieBoxClient::new(),
             fourk_client: FourKHdHubClient::new().ok(),
+            uhdmovies_client: UhdMoviesClient::new().ok(),
+            moviesmod_client: MoviesmodClient::new().ok(),
+            toonworld4all_client: ToonWorld4AllClient::new().ok(),
             circleftp_client: CircleFtpClient::new(),
             dhakaflix_client: DhakaFlixClient::new(),
             addon_client: crate::providers::addons::AddonClient::new(),
@@ -56,6 +65,58 @@ impl MovieBoxService {
             ProviderKind::BdixDhakaFlix => Provider::capabilities(&self.dhakaflix_client),
             ProviderKind::Addons => Provider::capabilities(&self.addon_client),
             ProviderKind::Dramachi => Provider::capabilities(&self.dramachi_client),
+            ProviderKind::UhdMovies => self
+                .uhdmovies_client
+                .as_ref()
+                .map(Provider::capabilities)
+                .unwrap_or_default(),
+            ProviderKind::Moviesmod => self
+                .moviesmod_client
+                .as_ref()
+                .map(Provider::capabilities)
+                .unwrap_or_default(),
+            ProviderKind::ToonWorld4All => self
+                .toonworld4all_client
+                .as_ref()
+                .map(Provider::capabilities)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub async fn resolve_wordpress_release(
+        &self,
+        release: &crate::providers::models::Release,
+        intent: crate::providers::models::ResolutionIntent,
+    ) -> Result<crate::providers::models::PlaybackSource, ProviderError> {
+        match release.provider {
+            ProviderKind::UhdMovies => {
+                self.uhdmovies_client
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ProviderError::Unavailable("UHDMovies provider is unavailable".into())
+                    })?
+                    .resolve_release(release, intent)
+                    .await
+            }
+            ProviderKind::Moviesmod => {
+                self.moviesmod_client
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ProviderError::Unavailable("Moviesmod provider is unavailable".into())
+                    })?
+                    .resolve_release(release, intent)
+                    .await
+            }
+            ProviderKind::ToonWorld4All => {
+                self.toonworld4all_client
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ProviderError::Unavailable("ToonWorld4All provider is unavailable".into())
+                    })?
+                    .resolve_release(release, intent)
+                    .await
+            }
+            _ => Err(ProviderError::Parsing("Not a WordPress release".into())),
         }
     }
 
@@ -90,6 +151,36 @@ impl MovieBoxService {
             }
             ProviderKind::Addons => Provider::search(&self.addon_client, query, page).await,
             ProviderKind::Dramachi => Provider::search(&self.dramachi_client, query, page).await,
+            ProviderKind::UhdMovies => {
+                Provider::search(
+                    self.uhdmovies_client.as_ref().ok_or_else(|| {
+                        ProviderError::Unavailable("UHDMovies provider is unavailable".into())
+                    })?,
+                    query,
+                    page,
+                )
+                .await
+            }
+            ProviderKind::Moviesmod => {
+                Provider::search(
+                    self.moviesmod_client.as_ref().ok_or_else(|| {
+                        ProviderError::Unavailable("Moviesmod provider is unavailable".into())
+                    })?,
+                    query,
+                    page,
+                )
+                .await
+            }
+            ProviderKind::ToonWorld4All => {
+                Provider::search(
+                    self.toonworld4all_client.as_ref().ok_or_else(|| {
+                        ProviderError::Unavailable("ToonWorld4All provider is unavailable".into())
+                    })?,
+                    query,
+                    page,
+                )
+                .await
+            }
         }
     }
 
@@ -158,6 +249,33 @@ impl MovieBoxService {
             }
             ProviderKind::Addons => Provider::details(&self.addon_client, subject_id).await,
             ProviderKind::Dramachi => Provider::details(&self.dramachi_client, subject_id).await,
+            ProviderKind::UhdMovies => {
+                Provider::details(
+                    self.uhdmovies_client.as_ref().ok_or_else(|| {
+                        ProviderError::Unavailable("UHDMovies provider is unavailable".into())
+                    })?,
+                    subject_id,
+                )
+                .await
+            }
+            ProviderKind::Moviesmod => {
+                Provider::details(
+                    self.moviesmod_client.as_ref().ok_or_else(|| {
+                        ProviderError::Unavailable("Moviesmod provider is unavailable".into())
+                    })?,
+                    subject_id,
+                )
+                .await
+            }
+            ProviderKind::ToonWorld4All => {
+                Provider::details(
+                    self.toonworld4all_client.as_ref().ok_or_else(|| {
+                        ProviderError::Unavailable("ToonWorld4All provider is unavailable".into())
+                    })?,
+                    subject_id,
+                )
+                .await
+            }
         }
     }
 
