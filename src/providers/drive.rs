@@ -281,6 +281,21 @@ async fn bypass_cloud(client: &reqwest::Client, sid: &Url) -> Result<Url, Provid
     Ok(script_redirect(&fifth.url, fifth.html.as_deref().unwrap_or_default()).unwrap_or(fifth.url))
 }
 
+/// Extract owned labels and URLs before the resolver awaits network requests. `scraper::Html`
+/// is not Send and must not remain live across an `.await` in a spawned playback task.
+fn drive_buttons(base: &Url, html: &str) -> Vec<(String, Url)> {
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("div.text-center > a[href]").unwrap();
+    document
+        .select(&selector)
+        .filter_map(|node| {
+            let url = site::external_url(base, node.value().attr("href")?)?;
+            let text = node.text().collect::<String>().to_ascii_lowercase();
+            Some((text, url))
+        })
+        .collect()
+}
+
 fn links_with_selector(base: &Url, html: &str, selector: &str) -> Vec<Url> {
     let document = Html::parse_document(html);
     let Ok(selector) = Selector::parse(selector) else {
@@ -644,18 +659,7 @@ async fn resolve_mirror(
             pending.push_front((next, depth + 1, label));
             continue;
         }
-        let document = Html::parse_document(&html);
-        let selector = Selector::parse("div.text-center > a[href]").unwrap();
-        let mut buttons = Vec::new();
-        for node in document.select(&selector) {
-            let Some(href) = node.value().attr("href") else {
-                continue;
-            };
-            if let Some(url) = site::external_url(&page.url, href) {
-                let text = node.text().collect::<String>().to_ascii_lowercase();
-                buttons.push((text, url));
-            }
-        }
+        let mut buttons = drive_buttons(&page.url, &html);
         // Driveleech/Driveseed: prefer resumable worker links for downloads, instant for
         // playback. Other buttons are tried if the preferred server is unavailable.
         buttons.sort_by_key(|(name, _)| {
@@ -745,6 +749,32 @@ async fn resolve_mirror(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_future_is_send_for_spawned_playback_and_download() {
+        fn assert_send<T: Send>(_: T) {}
+
+        let client = site::browser_client().unwrap();
+        let release = site::release(
+            ProviderKind::Moviesmod,
+            "Film.1080p",
+            "https://driveseed.example/file/abc",
+            None,
+        )
+        .unwrap();
+        assert_send(resolve_release(
+            &client,
+            &release,
+            ProviderKind::Moviesmod,
+            ResolutionIntent::Playback,
+        ));
+        assert_send(resolve_release(
+            &client,
+            &release,
+            ProviderKind::Moviesmod,
+            ResolutionIntent::Download,
+        ));
+    }
 
     #[tokio::test]
     async fn verification_gate_is_reported_but_other_mirrors_are_still_tried() {
