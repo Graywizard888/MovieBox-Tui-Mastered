@@ -136,10 +136,16 @@ impl ToonWorld4AllClient {
         let mut origins = self.origins().await;
         let requested = origins.site.clone();
         let url = site::item_url(&requested, id)?;
+        // WordPress permalinks normally end with '/', which is an empty final segment.
         let slug = url
             .path_segments()
-            .and_then(|mut segments| segments.next_back().map(str::to_string))
-            .filter(|slug| !slug.is_empty() && !slug.contains('/'))
+            .and_then(|segments| {
+                segments
+                    .filter(|segment| !segment.is_empty())
+                    .next_back()
+                    .map(str::to_string)
+            })
+            .filter(|slug| !slug.contains('/'))
             .ok_or_else(|| ProviderError::Parsing("Invalid ToonWorld4All post id".into()))?;
         let mut api = Self::api_url(&requested)?;
         api.query_pairs_mut().append_pair("slug", &slug);
