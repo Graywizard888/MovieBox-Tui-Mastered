@@ -325,7 +325,8 @@ fn quality_line(raw: &str) -> Option<String> {
 }
 
 fn episode_from_path(url: &Url) -> Option<(usize, usize)> {
-    let slug = url.path_segments()?.next_back()?.trim_end_matches('/');
+    // Archive episode permalinks may end in '/', leaving an empty final path segment.
+    let slug = url.path_segments()?.rfind(|segment| !segment.is_empty())?;
     let (season, episode) = slug.rsplit_once('-')?.1.split_once('x')?;
     let season = season.parse::<usize>().ok()?;
     let episode = episode.parse::<usize>().ok()?;
@@ -792,6 +793,22 @@ mod tests {
         assert_eq!(links[1].episode, Some(2));
         assert_eq!(links[0].quality, None);
         assert_eq!(links[0].mirrors[0].label, "Archive");
+    }
+
+    #[test]
+    fn archive_episode_permalinks_with_trailing_slashes_keep_episode_numbers() {
+        let origins = origins();
+        let releases = post_releases(
+            &origins,
+            "Show Season 2",
+            concat!(
+                "<a href='https://archive.toonworld4all.me/episode/show-2x3/'>Watch/Download</a>",
+                "<a href='https://archive.toonworld4all.me/episode/show-2x4'>Watch/Download</a>",
+            ),
+        );
+        assert_eq!(releases.len(), 2);
+        assert_eq!((releases[0].season, releases[0].episode), (Some(2), Some(3)));
+        assert_eq!((releases[1].season, releases[1].episode), (Some(2), Some(4)));
     }
 
     #[test]
