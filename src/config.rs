@@ -14,6 +14,9 @@ pub struct Config {
     pub active_theme: String,
     pub moviebox_enabled: bool,
     pub fourkhdhub_enabled: bool,
+    pub uhdmovies_enabled: bool,
+    pub moviesmod_enabled: bool,
+    pub toonworld4all_enabled: bool,
     pub dramachi_enabled: bool,
     pub bdix_circleftp_enabled: bool,
     pub bdix_dhakaflix_enabled: bool,
@@ -37,6 +40,9 @@ impl Default for Config {
             active_theme: String::new(),
             moviebox_enabled: true,
             fourkhdhub_enabled: true,
+            uhdmovies_enabled: true,
+            moviesmod_enabled: true,
+            toonworld4all_enabled: true,
             dramachi_enabled: true,
             bdix_circleftp_enabled: false,
             bdix_dhakaflix_enabled: false,
@@ -351,5 +357,29 @@ mod tests {
         let json = serde_json::to_string(&config).expect("serialize");
         let deserialized: Config = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(deserialized.active_mode, config.active_mode);
+        assert!(deserialized.uhdmovies_enabled && deserialized.moviesmod_enabled);
+        assert!(deserialized.toonworld4all_enabled);
+
+        // Existing configurations predate these flags; all three providers remain selectable.
+        let old = serde_json::json!({"active_provider": "moviebox", "dramachi_enabled": false});
+        let migrated: Config = serde_json::from_value(old).expect("old configuration");
+        assert!(migrated.uhdmovies_enabled && migrated.moviesmod_enabled);
+        assert!(migrated.toonworld4all_enabled);
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>("\"uhdmovies\"").unwrap(),
+            ProviderKind::UhdMovies
+        );
+        assert_eq!(
+            ProviderKind::parse("Moviesmod"),
+            Some(ProviderKind::Moviesmod)
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>("\"toonworld4all\"").unwrap(),
+            ProviderKind::ToonWorld4All
+        );
+        assert_eq!(
+            ProviderKind::parse("ToonWorld4All"),
+            Some(ProviderKind::ToonWorld4All)
+        );
     }
 }

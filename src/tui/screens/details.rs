@@ -1418,6 +1418,15 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) 
                             "MovieBox CDN".to_string()
                         }
                         crate::providers::models::ProviderKind::FourKHdHub => "4KHDHub".to_string(),
+                        crate::providers::models::ProviderKind::UhdMovies => {
+                            "UHDMovies".to_string()
+                        }
+                        crate::providers::models::ProviderKind::Moviesmod => {
+                            "Moviesmod".to_string()
+                        }
+                        crate::providers::models::ProviderKind::ToonWorld4All => {
+                            "ToonWorld4All".to_string()
+                        }
                         crate::providers::models::ProviderKind::BdixCircleFtp => {
                             "CircleFTP".to_string()
                         }

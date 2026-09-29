@@ -626,6 +626,9 @@ impl App {
                 let prov = self.provider_for_subject(&id);
 
                 if prov == ProviderKind::FourKHdHub
+                    || prov == ProviderKind::UhdMovies
+                    || prov == ProviderKind::Moviesmod
+                    || prov == ProviderKind::ToonWorld4All
                     || prov == ProviderKind::BdixCircleFtp
                     || prov == ProviderKind::BdixDhakaFlix
                 {
@@ -1045,8 +1048,21 @@ impl App {
                     self.state.language_list_state.select(Some(0));
                 }
 
-                self.state.selected_season = target_season;
-                self.state.selected_episode = target_episode;
+                // The first available season/episode need not be 1 (e.g. a post for only
+                // season 3). Keep the stream request in sync with the highlighted rows.
+                self.state.selected_season = self
+                    .state
+                    .available_seasons
+                    .get(season_idx)
+                    .map(|season| season.number)
+                    .unwrap_or(target_season);
+                self.state.selected_episode = self
+                    .state
+                    .available_episode_numbers
+                    .get(season_idx)
+                    .and_then(|episodes| episodes.get(ep_idx))
+                    .copied()
+                    .unwrap_or(target_episode);
 
                 let has_multiple_dubs = details.has_languages();
 
@@ -1361,11 +1377,17 @@ impl App {
                 }
 
                 if context.provider == ProviderKind::FourKHdHub
+                    || context.provider == ProviderKind::UhdMovies
+                    || context.provider == ProviderKind::Moviesmod
+                    || context.provider == ProviderKind::ToonWorld4All
                     || context.provider == ProviderKind::Dramachi
                     || context.provider.is_bdix()
                 {
                     let sender = self.action_sender.clone();
                     let fourk_client = self.service.fourk_client.clone();
+                    let uhdmovies_client = self.service.uhdmovies_client.clone();
+                    let moviesmod_client = self.service.moviesmod_client.clone();
+                    let toonworld4all_client = self.service.toonworld4all_client.clone();
                     let dramachi_client = self.service.dramachi_client.clone();
                     let circleftp_client = self.service.circleftp_client.clone();
                     let dhakaflix_client = self.service.dhakaflix_client.clone();
@@ -1381,6 +1403,42 @@ impl App {
                                 } else {
                                     Err(crate::providers::models::ProviderError::Unavailable(
                                         "4KHDHub provider is unavailable".to_string(),
+                                    ))
+                                }
+                            }
+                            ProviderKind::UhdMovies => {
+                                if let Some(client) = uhdmovies_client.as_ref() {
+                                    crate::providers::ReleaseProvider::episode_streams(
+                                        client, &id, season, episode,
+                                    )
+                                    .await
+                                } else {
+                                    Err(crate::providers::models::ProviderError::Unavailable(
+                                        "UHDMovies provider is unavailable".into(),
+                                    ))
+                                }
+                            }
+                            ProviderKind::Moviesmod => {
+                                if let Some(client) = moviesmod_client.as_ref() {
+                                    crate::providers::ReleaseProvider::episode_streams(
+                                        client, &id, season, episode,
+                                    )
+                                    .await
+                                } else {
+                                    Err(crate::providers::models::ProviderError::Unavailable(
+                                        "Moviesmod provider is unavailable".into(),
+                                    ))
+                                }
+                            }
+                            ProviderKind::ToonWorld4All => {
+                                if let Some(client) = toonworld4all_client.as_ref() {
+                                    crate::providers::ReleaseProvider::episode_streams(
+                                        client, &id, season, episode,
+                                    )
+                                    .await
+                                } else {
+                                    Err(crate::providers::models::ProviderError::Unavailable(
+                                        "ToonWorld4All provider is unavailable".into(),
                                     ))
                                 }
                             }
@@ -1829,6 +1887,48 @@ mod tests {
     use super::*;
     use crate::providers::models::{ProviderKind, Release, SourceMirror};
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn single_season_post_requests_its_actual_season_and_episode() {
+        let mut app = App::new();
+        app.state.active_provider = ProviderKind::ToonWorld4All;
+        app.state.active_screen = Screen::Details;
+        let id = "/jojo-season-3/".to_string();
+        let item = SearchResult {
+            id: id.clone(),
+            title: "JoJo Season 3".into(),
+            stype: 2,
+            release_year: "".into(),
+            cover_url: None,
+            season: 3,
+            episode: 2,
+            provider: ProviderKind::ToonWorld4All,
+        };
+        let mut details = crate::providers::models::MediaDetails::from_search_result(&item, None);
+        details.seasons = vec![Season {
+            number: 3,
+            episodes: vec![Episode {
+                season: 3,
+                number: 2,
+                title: None,
+                overview: None,
+            }],
+        }];
+        let context = app.request_context();
+        app.handle_requests(Action::DetailsSuccess(
+            context,
+            app.state.active_details_request,
+            id,
+            Box::new(details),
+        ))
+        .await;
+        assert_eq!(app.state.selected_season, 3);
+        assert_eq!(app.state.selected_episode, 2);
+        assert!(matches!(
+            app.action_receiver.try_recv(),
+            Ok(Action::InitStreamPool(subject)) if subject == "/jojo-season-3/"
+        ));
+    }
 
     #[tokio::test]
     async fn test_fourkhdhub_releases_not_collapsed_by_query_id() {

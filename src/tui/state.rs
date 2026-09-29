@@ -299,6 +299,9 @@ pub struct AppState {
     pub basic_terminal: bool,
     pub moviebox_enabled: bool,
     pub fourkhdhub_enabled: bool,
+    pub uhdmovies_enabled: bool,
+    pub moviesmod_enabled: bool,
+    pub toonworld4all_enabled: bool,
     pub dramachi_enabled: bool,
     pub bdix_circleftp_enabled: bool,
     pub bdix_dhakaflix_enabled: bool,
@@ -470,6 +473,9 @@ impl Default for AppState {
             overview_modal_content: String::new(),
             moviebox_enabled: true,
             fourkhdhub_enabled: true,
+            uhdmovies_enabled: true,
+            moviesmod_enabled: true,
+            toonworld4all_enabled: true,
             dramachi_enabled: true,
             bdix_circleftp_enabled: false,
             bdix_dhakaflix_enabled: false,
@@ -594,6 +600,9 @@ impl AppState {
         match p {
             ProviderKind::MovieBox => self.moviebox_enabled,
             ProviderKind::FourKHdHub => self.fourkhdhub_enabled,
+            ProviderKind::UhdMovies => self.uhdmovies_enabled,
+            ProviderKind::Moviesmod => self.moviesmod_enabled,
+            ProviderKind::ToonWorld4All => self.toonworld4all_enabled,
             ProviderKind::Dramachi => self.dramachi_enabled,
             ProviderKind::BdixCircleFtp => self.bdix_circleftp_enabled,
             ProviderKind::BdixDhakaFlix => self.bdix_dhakaflix_enabled,
@@ -605,6 +614,9 @@ impl AppState {
         match p {
             ProviderKind::MovieBox => self.moviebox_enabled = enabled,
             ProviderKind::FourKHdHub => self.fourkhdhub_enabled = enabled,
+            ProviderKind::UhdMovies => self.uhdmovies_enabled = enabled,
+            ProviderKind::Moviesmod => self.moviesmod_enabled = enabled,
+            ProviderKind::ToonWorld4All => self.toonworld4all_enabled = enabled,
             ProviderKind::Dramachi => self.dramachi_enabled = enabled,
             ProviderKind::BdixCircleFtp => self.bdix_circleftp_enabled = enabled,
             ProviderKind::BdixDhakaFlix => self.bdix_dhakaflix_enabled = enabled,
@@ -1373,6 +1385,40 @@ mod tests {
         assert!(s.available_providers().contains(&ProviderKind::Addons));
         s.addons_enabled = false;
         assert!(!s.available_providers().contains(&ProviderKind::Addons));
+    }
+
+    #[test]
+    fn wordpress_providers_can_be_cycled_and_toggled() {
+        let mut state = AppState::default();
+        assert!(
+            state
+                .available_providers()
+                .contains(&ProviderKind::UhdMovies)
+        );
+        assert!(
+            state
+                .available_providers()
+                .contains(&ProviderKind::Moviesmod)
+        );
+        state.active_provider = ProviderKind::UhdMovies;
+        assert_eq!(state.next_provider(), ProviderKind::Moviesmod);
+        state.active_provider = ProviderKind::Moviesmod;
+        assert_eq!(state.next_provider(), ProviderKind::ToonWorld4All);
+        state.active_provider = ProviderKind::UhdMovies;
+        state.set_provider_enabled(ProviderKind::Moviesmod, false);
+        assert!(
+            !state
+                .available_providers()
+                .contains(&ProviderKind::Moviesmod)
+        );
+        assert_eq!(state.next_provider(), ProviderKind::ToonWorld4All);
+        state.set_provider_enabled(ProviderKind::ToonWorld4All, false);
+        assert!(
+            !state
+                .available_providers()
+                .contains(&ProviderKind::ToonWorld4All)
+        );
+        assert_eq!(state.next_provider(), ProviderKind::Dramachi);
     }
 
     #[test]

@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 const CACHE_EXPIRY_SECS: u64 = 24 * 60 * 60;
 const STREAM_CACHE_EXPIRY_SECS: u64 = 2 * 60 * 60;
 const HOMEPAGE_CACHE_EXPIRY_SECS: u64 = 60 * 60;
+
+fn has_rotating_domain(provider: ProviderKind) -> bool {
+    matches!(
+        provider,
+        ProviderKind::UhdMovies | ProviderKind::Moviesmod | ProviderKind::ToonWorld4All
+    )
+}
 pub const CACHE_MAGIC: [u8; 4] = *b"MBC1";
 
 #[derive(Serialize, Deserialize)]
@@ -217,6 +224,11 @@ pub fn get_provider_stream_cache_typed(
     season: usize,
     episode: usize,
 ) -> Option<Vec<Release>> {
+    // These providers can change origins mid-session. An unscoped disk cache would keep
+    // old absolute mirror URLs for hours and prevent discovery from running at all.
+    if has_rotating_domain(provider) {
+        return None;
+    }
     let path = get_provider_stream_path(provider, subject_id, season, episode);
     let releases: Vec<Release> = get_typed_cache(&path, STREAM_CACHE_EXPIRY_SECS)?;
     if releases.is_empty() {
@@ -242,7 +254,7 @@ pub fn set_provider_stream_cache_typed(
     episode: usize,
     releases: &[Release],
 ) {
-    if releases.is_empty() {
+    if has_rotating_domain(provider) || releases.is_empty() {
         return;
     }
     let path = get_provider_stream_path(provider, subject_id, season, episode);
@@ -351,6 +363,9 @@ pub fn get_provider_details_cache_typed(
     provider: ProviderKind,
     subject_id: &str,
 ) -> Option<MediaDetails> {
+    if has_rotating_domain(provider) {
+        return None;
+    }
     let path = get_provider_details_path(provider, subject_id);
     get_typed_cache(&path, CACHE_EXPIRY_SECS)
 }
@@ -360,6 +375,9 @@ pub fn set_provider_details_cache_typed(
     subject_id: &str,
     details: &MediaDetails,
 ) {
+    if has_rotating_domain(provider) {
+        return;
+    }
     let path = get_provider_details_path(provider, subject_id);
     set_typed_cache(&path, CACHE_EXPIRY_SECS, details);
 }
@@ -381,6 +399,9 @@ pub fn get_provider_search_cache_typed(
     query: &str,
     page: usize,
 ) -> Option<Vec<CatalogItem>> {
+    if has_rotating_domain(provider) {
+        return None;
+    }
     let path = get_provider_search_path(provider, query, page);
     let items: Vec<CatalogItem> = get_typed_cache(&path, CACHE_EXPIRY_SECS)?;
     (!items.is_empty()).then_some(items)
@@ -392,7 +413,7 @@ pub fn set_provider_search_cache_typed(
     page: usize,
     items: &[CatalogItem],
 ) {
-    if items.is_empty() {
+    if has_rotating_domain(provider) || items.is_empty() {
         return;
     }
     let path = get_provider_search_path(provider, query, page);
@@ -711,6 +732,22 @@ pub fn clean_old_cache_background() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotating_wordpress_providers_never_reuse_unscoped_disk_cache() {
+        for provider in [
+            ProviderKind::UhdMovies,
+            ProviderKind::Moviesmod,
+            ProviderKind::ToonWorld4All,
+        ] {
+            assert!(has_rotating_domain(provider));
+            assert!(get_provider_search_cache_typed(provider, "film", 1).is_none());
+            assert!(get_provider_details_cache_typed(provider, "/film/").is_none());
+            assert!(get_provider_stream_cache_typed(provider, "/film/", 0, 0).is_none());
+        }
+        assert!(!has_rotating_domain(ProviderKind::MovieBox));
+        assert!(!has_rotating_domain(ProviderKind::FourKHdHub));
+    }
 
     fn unique_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

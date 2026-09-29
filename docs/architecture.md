@@ -63,6 +63,10 @@ src/
 │   ├── models.rs                  # Provider traits (Provider, ReleaseProvider) & capabilities
 │   ├── moviebox/                  # CloudFront signed requests, token generation, & scraper
 │   ├── fourkhdhub/                # 4K releases, HTML parser, & HubCloud mirror resolver
+│   ├── uhdmovies/                 # UHDMovies WordPress catalog, movies and episodes
+│   ├── moviesmod/                 # Moviesmod catalog and episode link pages
+│   ├── toonworld4all/             # WordPress posts, episode archive, safe link resolver
+│   ├── drive.rs, site.rs          # Shared direct-media resolver and safe site URL helpers
 │   ├── dramachi/                  # Asian dramas and series scraper
 │   ├── bdix/                      # BDIX optical intranet scrapers (CircleFTP, DhakaFlix)
 │   │   └── common.rs              # Centralized codec, resolution, & language heuristics
@@ -161,7 +165,7 @@ interval, forwarding them into the action channel (capacity 128).
 - `favorites.json`: starred titles in the system data dir, independent of `history.json`.
 - `playback/` — temporary playback states for session crash/kill reconciliation in the system data dir.
 - `scripts/` — bundled player scripts (`moviebox_tracker.lua`) in the system data dir.
-- Cache lives under the system cache dir, keyed per provider.
+- Cache lives under the system cache dir, keyed per provider. UHDMovies, Moviesmod, and ToonWorld4All skip the unscoped on-disk search/details/stream cache so stale absolute URLs cannot mask a domain rotation; other providers retain their existing caching behavior.
 - Logs live under the system data dir with rotation.
 
 See `config.md` and `logging.md` for exact locations and formats.
