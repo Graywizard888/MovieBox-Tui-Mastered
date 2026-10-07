@@ -41,3 +41,18 @@ MovieBox DASH streams require `yt-dlp` and `ffmpeg` to download and mux adaptive
 The downloader preflights both binaries before launching the transfer, failing fast with platform-specific installation commands if either is absent. Transferred fragments are pulled with `--concurrent-fragments 8` and `--http-chunk-size 95K` (keeping individual range sub-requests under Tengine's `limit_rate_after 96k` throttle boundary) alongside resilient retry bounds (`--fragment-retries 10`, `--retries 5`, `--socket-timeout 30`). Any subprocess errors during transfer capture and display the underlying `yt-dlp` error diagnostics directly in the failure notification.
 
 All other providers (4KHDHub, UHDMovies, Moviesmod, ToonWorld4All, Dramachi, BDIX, DhakaFlix, CircleFTP, Stremio Addons, TV mode) download through the internal multi-segment HTTP engine after resolving any provider link pages to media URLs (4–12 concurrent workers writing in-place to the pre-allocated `.part` file). ToonWorld4All archive/movie mirrors that require an interactive ad shortener or return a landing page cannot be downloaded automatically.
+
+## Season downloads from UHDMovies, Moviesmod and ToonWorld4All
+
+These providers list several encodes per episode (often 2160p remuxes of 10–20 GB each), so
+pressing `d` on a season asks which quality to use. The list shows each encode with its size;
+the stream highlighted when you pressed `d` is preselected. Your choice is applied to every
+episode in the queue, matching the same encode first, then the same resolution and codec, then
+the nearest resolution. It asks again each time you start a season download, and `Esc`
+cancels without queueing anything.
+
+If a link cannot be resolved part-way through a season, the queue halts with a
+"Season download halted" notice that says how many files finished.
+
+Saved files use the container the host reports (`.mkv` for Matroska) instead of always `.mp4`.
+

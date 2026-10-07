@@ -37,6 +37,7 @@ impl App {
         self.reset_transient_overlays();
         self.state.subtitle_popup = false;
         self.state.is_download_subtitle_popup = false;
+        self.state.season_quality_pending = false;
         self.state.player_picker_popup = false;
         self.state.show_overview_modal = false;
         self.state.active_provider = provider;
@@ -349,6 +350,10 @@ impl App {
                     self.state.player_picker_popup = false;
                     self.state.player_picker_state.select(None);
                     self.state.settings_player_picker = false;
+                    return None;
+                }
+                if self.state.season_quality_pending {
+                    self.cancel_season_quality_prompt();
                     return None;
                 }
                 if self.state.subtitle_popup || self.state.is_download_subtitle_popup {
@@ -772,6 +777,9 @@ impl App {
                         };
                         self.dispatch_playback_or_notify(source);
                     }
+                    return None;
+                } else if self.state.season_quality_pending {
+                    self.confirm_season_quality();
                     return None;
                 } else if self.state.is_download_subtitle_popup {
                     self.state.is_download_subtitle_popup = false;

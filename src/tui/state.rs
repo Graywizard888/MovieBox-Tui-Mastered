@@ -129,6 +129,144 @@ pub type HomepageCacheData = (
     Vec<CatalogItem>,
     std::collections::HashMap<String, BrowseMetrics>,
 );
+/// A season-wide quality choice. Episodes of one season share the same release variants
+/// ("2160p 4k SDR Web-DL", "1080p Remux", ...), so the variant, then resolution and codec, find
+/// the matching release in each episode's own list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeasonQuality {
+    pub height: u64,
+    pub codec: Option<String>,
+    /// Release descriptor without per-episode parts, lowercased (see [`variant_of`]).
+    pub variant: Option<String>,
+}
+
+/// The part of a release name that identifies its encode: the name with sizes, zip notes,
+/// episode and season markers removed, e.g. `2160p 4k SDR Web-DL`. Returns `(lowercase key
+/// part, display text)`.
+pub fn variant_of(release: &crate::providers::models::Release) -> (String, String) {
+    let mut text = String::new();
+    let mut depth = 0usize;
+    let mut group = String::new();
+    for ch in release.filename.chars() {
+        match ch {
+            '[' | '(' | '{' => {
+                depth += 1;
+                group.push(ch);
+            }
+            ']' | ')' | '}' if depth > 0 => {
+                depth -= 1;
+                group.push(ch);
+                if depth == 0 {
+                    let lower = group.to_ascii_lowercase();
+                    let is_size = ["gb", "mb", "zip", "/e"]
+                        .iter()
+                        .any(|unit| lower.contains(unit));
+                    if !is_size {
+                        text.push_str(&group);
+                    }
+                    group.clear();
+                }
+            }
+            _ if depth > 0 => group.push(ch),
+            _ => text.push(ch),
+        }
+    }
+    text.push_str(&group);
+    let mut words: Vec<&str> = Vec::new();
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let mut index = 0;
+    while index < tokens.len() {
+        let lower = tokens[index].to_ascii_lowercase();
+        let is_marker = matches!(lower.as_str(), "episode" | "season" | "ep");
+        let next_is_number = tokens
+            .get(index + 1)
+            .is_some_and(|next| next.chars().all(|c| c.is_ascii_digit()));
+        if is_marker && next_is_number {
+            index += 2;
+            continue;
+        }
+        let bytes = lower.as_bytes();
+        let is_sxxexx = bytes.first() == Some(&b's')
+            && lower.contains('e')
+            && lower[1..].chars().all(|c| c.is_ascii_digit() || c == 'e');
+        if !is_sxxexx {
+            words.push(tokens[index]);
+        }
+        index += 1;
+    }
+    let display = words.join(" ");
+    (display.to_ascii_lowercase().replace('|', " "), display)
+}
+
+impl SeasonQuality {
+    /// Picker entry key for a release, e.g. `1080|hevc|1080p 10bit`.
+    pub fn key_for(release: &crate::providers::models::Release) -> String {
+        format!(
+            "{}|{}|{}",
+            release.resolution_u64(),
+            release
+                .codec
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default()
+                .replace('|', " "),
+            variant_of(release).0
+        )
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        let mut parts = key.splitn(3, '|');
+        let height = parts.next()?.parse().ok()?;
+        let codec = parts.next()?;
+        let variant = parts.next().unwrap_or_default();
+        Some(Self {
+            height,
+            codec: Some(codec.to_string()).filter(|codec| !codec.is_empty()),
+            variant: Some(variant.to_string()).filter(|variant| !variant.is_empty()),
+        })
+    }
+
+    /// Index of the release that best matches this choice: the same variant, then the same
+    /// resolution and codec, then the same resolution, then the nearest resolution (the lower
+    /// one on a tie).
+    pub fn pick(&self, releases: &[crate::providers::models::Release]) -> Option<usize> {
+        let codec_of = |release: &crate::providers::models::Release| {
+            release.codec.as_deref().map(str::to_ascii_lowercase)
+        };
+        self.variant
+            .as_ref()
+            .and_then(|variant| {
+                releases
+                    .iter()
+                    .position(|r| r.resolution_u64() == self.height && variant_of(r).0 == *variant)
+            })
+            .or_else(|| {
+                releases
+                    .iter()
+                    .position(|r| r.resolution_u64() == self.height && codec_of(r) == self.codec)
+            })
+            .or_else(|| {
+                releases
+                    .iter()
+                    .position(|r| r.resolution_u64() == self.height)
+            })
+            .or_else(|| {
+                releases
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.resolution_u64() > 0)
+                    .min_by_key(|(index, r)| {
+                        (
+                            r.resolution_u64().abs_diff(self.height),
+                            r.resolution_u64() > self.height,
+                            *index,
+                        )
+                    })
+                    .map(|(index, _)| index)
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResultMetrics {
     pub poster_rows_eff: u16,
@@ -185,6 +323,13 @@ pub struct AppState {
     pub stream_pool: std::collections::HashMap<String, SubjectStreamPool>,
     pub fetch_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub is_waiting_for_download_stream: bool,
+    /// Container extension reported by the resolved host, for links that carry none.
+    pub download_extension_hint: Option<&'static str>,
+    /// The download popup is asking which quality a whole season should use. It reuses the
+    /// subtitle popup's list and key handling, with `(label, choice key)` entries.
+    pub season_quality_pending: bool,
+    /// Quality chosen for the running season queue (see `SeasonQuality`).
+    pub season_quality_choice: Option<SeasonQuality>,
     pub auto_play_on_ready: bool,
     pub is_fetching_streams: bool,
     pub stream_error: Option<String>,
@@ -365,6 +510,9 @@ impl Default for AppState {
             stream_pool: std::collections::HashMap::new(),
             fetch_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             is_waiting_for_download_stream: false,
+            download_extension_hint: None,
+            season_quality_pending: false,
+            season_quality_choice: None,
             is_fetching_streams: false,
             auto_play_on_ready: false,
             stream_error: None,
@@ -531,6 +679,7 @@ impl AppState {
         self.show_overview_modal = false;
         self.subtitle_popup = false;
         self.is_download_subtitle_popup = false;
+        self.season_quality_pending = false;
         self.player_picker_popup = false;
         self.selected_details = None;
         self.selected_resources.clear();

@@ -480,6 +480,7 @@ impl App {
             }
 
             Action::DownloadStream(..)
+            | Action::SetDownloadExtension(..)
             | Action::StartDownload(..)
             | Action::DownloadEpisode
             | Action::DownloadSeason
@@ -1118,12 +1119,23 @@ impl App {
                 .state
                 .subtitle_list
                 .iter()
-                .map(|(name, _)| crate::tui::text::format_subtitle_label(name))
+                .map(|(name, _)| {
+                    if self.state.season_quality_pending {
+                        name.clone()
+                    } else {
+                        crate::tui::text::format_subtitle_label(name)
+                    }
+                })
                 .collect::<Vec<_>>();
             let confirm_label = if self.state.is_download_subtitle_popup {
                 "Download"
             } else {
                 "Use"
+            };
+            let title = if self.state.season_quality_pending {
+                "Season quality"
+            } else {
+                "Subtitles"
             };
             crate::tui::overlay::picker(
                 frame,
@@ -1131,9 +1143,13 @@ impl App {
                 &items,
                 &mut self.state.subtitle_list_state,
                 crate::tui::overlay::PickerSpec {
-                    title: "Subtitles",
+                    title,
                     confirm_label,
-                    minimum_width: 20,
+                    minimum_width: if self.state.season_quality_pending {
+                        48
+                    } else {
+                        20
+                    },
                     show_counter: true,
                 },
                 &self.theme,
