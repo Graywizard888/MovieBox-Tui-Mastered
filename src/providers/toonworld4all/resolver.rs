@@ -1,7 +1,7 @@
 //! Resolve ToonWorld4All archive/worker wrappers before trying the existing media preflight.
 //! Ad shorteners and HTML landing pages are deliberately never returned to playback/download.
 use reqwest::Url;
-use reqwest::header::{CONTENT_TYPE, LOCATION};
+use reqwest::header::{CONTENT_TYPE, COOKIE, LOCATION};
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 
@@ -61,8 +61,20 @@ fn allowed_target(url: &Url, origins: &Origins) -> bool {
 
 fn shortener_error() -> ProviderError {
     ProviderError::Unavailable(
-        "Mirror requires an interactive ad shortener; choose another mirror or quality".into(),
+        "Mirror requires an interactive ad shortener; solve it once in a browser and set \
+         MOVIEBOX_TOONWORLD_COOKIE to that browser's archive.toonworld4all.me cookies, or \
+         choose another mirror or quality"
+            .into(),
     )
+}
+
+/// Cookies copied from a browser that already passed the archive's 24-hour ad gate. They are
+/// supplied by the user, sent only to the archive's own redirect pages, and never logged.
+fn archive_cookie() -> Option<String> {
+    std::env::var("MOVIEBOX_TOONWORLD_COOKIE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
 }
 
 async fn limited_html(
@@ -91,13 +103,15 @@ async fn unwrap_redirect(
     client: &reqwest::Client,
     url: &Url,
     archive: bool,
+    cookie: Option<&str>,
+    gate_seen: &mut bool,
 ) -> Result<Url, ProviderError> {
     site::safe_url(url.as_str())?;
-    let response = client
-        .get(url.clone())
-        .send()
-        .await
-        .map_err(site::network_error)?;
+    let mut request = client.get(url.clone());
+    if archive && let Some(cookie) = cookie {
+        request = request.header(COOKIE, cookie);
+    }
+    let response = request.send().await.map_err(site::network_error)?;
     let status = response.status();
     if status.is_redirection() {
         let target = response
@@ -122,6 +136,9 @@ async fn unwrap_redirect(
     }
     let html = limited_html(response, 512 * 1024).await?;
     if archive {
+        // The page that asks the visitor to pick an ad shortener shows a placeholder
+        // destination that is not a real file until the gate is passed.
+        *gate_seen |= html.contains("Shortener Redirect System");
         parser::destination_url(&html).ok_or_else(|| {
             ProviderError::Unavailable("Archive destination is hidden behind an ad gate".into())
         })
@@ -271,6 +288,8 @@ pub(super) async fn resolve_release(
         ));
     }
     let mut ad_gate = false;
+    let mut gate_seen = false;
+    let cookie = archive_cookie();
     for mirror in release.mirrors.iter().take(8) {
         let result = async {
             let mut target =
@@ -285,7 +304,14 @@ pub(super) async fn resolve_release(
                 if is_wrapper(&target, origins) {
                     target = parser::canonical_link(
                         origins,
-                        &unwrap_redirect(no_redirect, &target, archive).await?,
+                        &unwrap_redirect(
+                            no_redirect,
+                            &target,
+                            archive,
+                            cookie.as_deref(),
+                            &mut gate_seen,
+                        )
+                        .await?,
                     );
                     if !allowed_target(&target, origins) {
                         return Err(shortener_error());
@@ -314,7 +340,7 @@ pub(super) async fn resolve_release(
             }
         }
     }
-    Err(if ad_gate {
+    Err(if ad_gate || gate_seen {
         shortener_error()
     } else {
         ProviderError::Unavailable(

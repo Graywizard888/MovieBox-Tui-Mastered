@@ -1510,4 +1510,59 @@ mod tests {
         assert_eq!(series_file, expected_series_file);
         assert_eq!(series_sub, expected_series_sub);
     }
+
+    #[tokio::test]
+    async fn wordpress_season_download_waits_for_streams_instead_of_failing() {
+        // The season queue asks for a download right after requesting the episode's streams.
+        // That request must park (not fail) until the streams arrive.
+        for provider in [
+            ProviderKind::UhdMovies,
+            ProviderKind::Moviesmod,
+            ProviderKind::ToonWorld4All,
+        ] {
+            let mut app = App::new();
+            app.state.active_provider = provider;
+            app.state.active_screen = Screen::Details;
+            app.state.is_fetching_streams = true;
+            app.state.selected_resources.clear();
+
+            app.handle_download(Action::DownloadStream(None)).await;
+            let dispatched = app.action_receiver.try_recv().expect("action dispatched");
+            let Action::StartDownload(sub, link, headers, max_height) = dispatched else {
+                panic!("expected StartDownload for {provider:?}");
+            };
+            assert!(link.is_none(), "no stream is selected yet");
+            app.handle_download(Action::StartDownload(sub, link, headers, max_height))
+                .await;
+
+            assert!(
+                app.state.is_waiting_for_download_stream,
+                "{provider:?} download should wait for streams"
+            );
+            assert!(app.state.download_progress.is_none());
+            assert!(
+                app.state
+                    .notifications
+                    .iter()
+                    .all(|note| note.kind != NotificationKind::Error),
+                "{provider:?} must not report an error while streams load"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wordpress_download_without_streams_reports_a_clear_warning() {
+        let mut app = App::new();
+        app.state.active_provider = ProviderKind::UhdMovies;
+        app.state.active_screen = Screen::Details;
+        app.state.is_fetching_streams = false;
+
+        app.handle_download(Action::StartDownload(None, None, Vec::new(), None))
+            .await;
+
+        assert!(!app.state.is_waiting_for_download_stream);
+        let note = app.state.notifications.back().expect("notification posted");
+        assert_eq!(note.kind, NotificationKind::Warning);
+        assert_eq!(note.title, "Download unavailable");
+    }
 }

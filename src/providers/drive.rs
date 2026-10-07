@@ -95,6 +95,17 @@ async fn fetch_page(
     cookies: Option<&mut Cookies>,
     referer: Option<&Url>,
 ) -> Result<Page, ProviderError> {
+    fetch_page_checked(client, url, cookies, referer, true).await
+}
+
+/// `strict` rejects "not a robot" interstitials; gate hops pass `false` (see `check_challenge`).
+async fn fetch_page_checked(
+    client: &reqwest::Client,
+    url: &Url,
+    cookies: Option<&mut Cookies>,
+    referer: Option<&Url>,
+    strict: bool,
+) -> Result<Page, ProviderError> {
     site::safe_url(url.as_str())?;
     let mut request = client.get(url.clone());
     if let Some(referer) = referer {
@@ -141,7 +152,11 @@ async fn fetch_page(
         body.extend_from_slice(&chunk);
     }
     let html = String::from_utf8_lossy(&body).into_owned();
-    site::check_page(&html)?;
+    if strict {
+        site::check_page(&html)?;
+    } else {
+        site::check_challenge(&html)?;
+    }
     Ok(Page {
         url: final_url,
         html: Some(html),
@@ -179,34 +194,79 @@ async fn post_form(
         body.extend_from_slice(&chunk);
     }
     let html = String::from_utf8_lossy(&body).into_owned();
-    site::check_page(&html)?;
+    site::check_challenge(&html)?;
     Ok(Page {
         url: final_url,
         html: Some(html),
     })
 }
 
+/// Gate pages hide the next hop in an auto-submitted POST form. Older gates used
+/// `form#landing` with `_wp_*` fields; the current LinkPilot gate uses `lp-*` form ids with
+/// `_lp_*` fields. Recognize both by id or by their marker fields, never by position.
 fn landing_form(url: &Url, html: &str) -> Option<(Url, Vec<(String, String)>)> {
     let document = Html::parse_document(html);
-    let form = document
-        .select(&Selector::parse("form#landing").ok()?)
-        .next()?;
-    let action = site::external_url(url, form.value().attr("action")?)?;
-    // The form may be on a fake blog path, but must remain on the landing host.
-    if action.origin() != url.origin() {
+    let forms = Selector::parse("form[action]").ok()?;
+    let fields = Selector::parse("input[name]").ok()?;
+    for form in document.select(&forms) {
+        let id = form.value().attr("id").unwrap_or_default();
+        let inputs = form
+            .select(&fields)
+            .map(|input| {
+                (
+                    input.value().attr("name").unwrap_or_default().to_string(),
+                    input.value().attr("value").unwrap_or_default().to_string(),
+                )
+            })
+            .filter(|(name, _)| !name.is_empty())
+            .collect::<Vec<_>>();
+        let gated = id == "landing"
+            || id.starts_with("lp-")
+            || inputs
+                .iter()
+                .any(|(name, _)| name.starts_with("_lp_") || name.starts_with("_wp_"));
+        if !gated || inputs.is_empty() {
+            continue;
+        }
+        let action = site::external_url(url, form.value().attr("action")?)?;
+        // The form may be on a fake blog path, but must remain on the landing host.
+        if action.origin() != url.origin() {
+            continue;
+        }
+        return Some((action, inputs));
+    }
+    None
+}
+
+/// The final LinkPilot hop stores a one-time cookie from inline script (`sc("lp-…","<value>",60)`)
+/// and exposes the next URL as `/?lp_go=<cookie name>`. Replay exactly that pair.
+fn lp_go(base: &Url, html: &str) -> Option<(Url, String, String)> {
+    let tail = html.split("?lp_go=").nth(1)?;
+    let name: String = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        .take(120)
+        .collect();
+    if name.is_empty() {
         return None;
     }
-    let inputs = form
-        .select(&Selector::parse("input[name]").ok()?)
-        .map(|input| {
-            (
-                input.value().attr("name").unwrap_or_default().to_string(),
-                input.value().attr("value").unwrap_or_default().to_string(),
-            )
-        })
-        .filter(|(name, _)| !name.is_empty())
-        .collect::<Vec<_>>();
-    (!inputs.is_empty()).then_some((action, inputs))
+    let marker = format!("\"{name}\",\"");
+    let value_tail = html.split(&marker).nth(1)?;
+    let value: String = value_tail
+        .split('"')
+        .next()?
+        .replace("\\/", "/")
+        .chars()
+        .take(4096)
+        .collect();
+    if value.is_empty() {
+        return None;
+    }
+    let mut go = base.clone();
+    go.set_path("/");
+    go.set_query(None);
+    go.query_pairs_mut().append_pair("lp_go", &name);
+    Some((go, name, value))
 }
 
 fn go_token(html: &str) -> Option<String> {
@@ -244,41 +304,75 @@ fn script_redirect(base: &Url, html: &str) -> Option<Url> {
                 .strip_prefix('"')
                 .or_else(|| after.strip_prefix('\''))?;
             let target = after.split(['"', '\'']).next()?;
+            // Inline script written through JSON escapes slashes (`https:\/\/host\/path`).
+            let target = target.replace("\\/", "/");
             if !target.starts_with("/404") {
-                return site::external_url(base, target);
+                return site::external_url(base, &target);
             }
         }
     }
     None
 }
 
+const MAX_GATE_HOPS: usize = 8;
+
+/// Walk a link gate (`?sid=` landing pages) to the file host it protects. Supports the old
+/// two-form + `?go=` token chain and the current LinkPilot chain (`_lp_*` forms, then a
+/// cookie + `?lp_go=` request). Timers on these pages are client-side only, so nothing sleeps.
 async fn bypass_cloud(client: &reqwest::Client, sid: &Url) -> Result<Url, ProviderError> {
     let mut jar = Cookies::default();
-    let first = fetch_page(client, sid, Some(&mut jar), None).await?;
-    let (action1, data1) = landing_form(&first.url, first.html.as_deref().unwrap_or_default())
-        .ok_or_else(|| ProviderError::Parsing("Cloud landing form missing".into()))?;
-    let second = post_form(client, &action1, &data1, &first.url, &mut jar).await?;
-    let (action2, data2) = landing_form(&second.url, second.html.as_deref().unwrap_or_default())
-        .ok_or_else(|| ProviderError::Parsing("Second cloud landing form missing".into()))?;
-    let third = post_form(client, &action2, &data2, &second.url, &mut jar).await?;
-    let token = go_token(third.html.as_deref().unwrap_or_default())
-        .ok_or_else(|| ProviderError::Parsing("Cloud redirect token missing".into()))?;
-    let cookie_value = data2
-        .iter()
-        .find(|(key, _)| key == "_wp_http2")
-        .map(|(_, value)| value.clone())
-        .ok_or_else(|| ProviderError::Parsing("Cloud redirect cookie missing".into()))?;
-    jar.0.insert(token.clone(), cookie_value);
-    let mut go = sid.clone();
-    go.set_path("/");
-    go.set_query(None);
-    go.query_pairs_mut().append_pair("go", &token);
-    let fourth = fetch_page(client, &go, Some(&mut jar), Some(&action2)).await?;
-    let target = refresh_url(&fourth.url, fourth.html.as_deref().unwrap_or_default())
-        .ok_or_else(|| ProviderError::Parsing("Cloud redirect missing".into()))?;
-    // Never send the landing cookies to the destination host.
-    let fifth = fetch_page(client, &target, None, Some(&go)).await?;
-    Ok(script_redirect(&fifth.url, fifth.html.as_deref().unwrap_or_default()).unwrap_or(fifth.url))
+    let mut page = fetch_page_checked(client, sid, Some(&mut jar), None, false).await?;
+    let mut old_cookie: Option<String> = None;
+    let mut posted = HashSet::new();
+    for _ in 0..MAX_GATE_HOPS {
+        let html = page.html.clone().unwrap_or_default();
+        if let Some((action, data)) = landing_form(&page.url, &html) {
+            let key = format!("{action}|{data:?}");
+            if !posted.insert(key) {
+                return Err(ProviderError::Parsing("Cloud gate looped".into()));
+            }
+            if let Some((_, value)) = data.iter().find(|(name, _)| name == "_wp_http2") {
+                old_cookie = Some(value.clone());
+            }
+            page = post_form(client, &action, &data, &page.url, &mut jar).await?;
+            continue;
+        }
+        if let Some((go, name, value)) = lp_go(&page.url, &html) {
+            jar.0.insert(name, value);
+            page = fetch_page_checked(client, &go, Some(&mut jar), Some(&page.url), false).await?;
+            continue;
+        }
+        if let (Some(token), Some(cookie)) = (go_token(&html), old_cookie.take()) {
+            jar.0.insert(token.clone(), cookie);
+            let mut go = sid.clone();
+            go.set_path("/");
+            go.set_query(None);
+            go.query_pairs_mut().append_pair("go", &token);
+            let fourth =
+                fetch_page_checked(client, &go, Some(&mut jar), Some(&page.url), false).await?;
+            let target = refresh_url(&fourth.url, fourth.html.as_deref().unwrap_or_default())
+                .ok_or_else(|| ProviderError::Parsing("Cloud redirect missing".into()))?;
+            // Never send the landing cookies to the destination host.
+            let fifth = fetch_page_checked(client, &target, None, Some(&go), false).await?;
+            return Ok(
+                script_redirect(&fifth.url, fifth.html.as_deref().unwrap_or_default())
+                    .unwrap_or(fifth.url),
+            );
+        }
+        if let Some(target) =
+            script_redirect(&page.url, &html).or_else(|| refresh_url(&page.url, &html))
+            && target.origin() != page.url.origin()
+        {
+            return Ok(target);
+        }
+        break;
+    }
+    // No known next hop. An interactive "not a robot" page is a verification gate; anything
+    // else means the gate changed shape again.
+    site::check_page(page.html.as_deref().unwrap_or_default())?;
+    Err(ProviderError::Parsing(
+        "Cloud gate format is not recognized".into(),
+    ))
 }
 
 /// Extract owned labels and URLs before the resolver awaits network requests. `scraper::Html`
@@ -986,6 +1080,106 @@ mod tests {
             .path(),
             "/file/key"
         );
+    }
+
+    #[test]
+    fn recognizes_current_gate_forms_and_cookie_hop() {
+        let base = Url::parse("https://en.gate.example/?sid=abc").unwrap();
+        let (url, fields) = landing_form(
+            &base,
+            r#"<form id="lp-land" method="POST" action="https://en.gate.example/"><input type="hidden" name="_lp_http" value="v1"></form>"#,
+        )
+        .unwrap();
+        assert_eq!(url.path(), "/");
+        assert_eq!(fields, vec![("_lp_http".into(), "v1".into())]);
+        // Search forms and cross-origin forms are never treated as gates.
+        assert!(
+            landing_form(
+                &base,
+                r#"<form role="search" action="/"><input name="s" value=""></form>"#
+            )
+            .is_none()
+        );
+        assert!(landing_form(&base, r#"<form id="lp-x" action="https://evil.example/"><input name="_lp_http" value="v"></form>"#).is_none());
+        let (go, name, value) = lp_go(
+            &base,
+            r#"<script>sc("lp-1f","eJy\/Zz==",60); bg.setAttribute('href',"https:\/\/en.gate.example\/?lp_go=lp-1f");</script>"#,
+        )
+        .unwrap();
+        assert_eq!(go.as_str(), "https://en.gate.example/?lp_go=lp-1f");
+        assert_eq!((name.as_str(), value.as_str()), ("lp-1f", "eJy/Zz=="));
+        assert!(lp_go(&base, "<p>no gate here</p>").is_none());
+    }
+
+    #[tokio::test]
+    async fn walks_current_linkpilot_gate_to_the_file_host() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let target_base = format!("http://{}", other.local_addr().unwrap());
+        let hops = Arc::new(AtomicUsize::new(0));
+        let seen = hops.clone();
+        let (server_base, destination) = (base.clone(), target_base.clone());
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut data = [0; 8192];
+                let Ok(n) = stream.read(&mut data).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&data[..n]).to_string();
+                let mut first = request.split_whitespace();
+                let (method, path) = (first.next().unwrap_or(""), first.next().unwrap_or(""));
+                let body = match (method, path) {
+                    ("GET", "/?sid=abc") => format!(
+                        "<form id='lp-land' method='POST' action='{server_base}/'><input type='hidden' name='_lp_http' value='v1'></form>"
+                    ),
+                    ("POST", "/") if request.contains("_lp_http=v1") => {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        format!(
+                            "<form role='search' action='{server_base}/'><input name='s' value=''></form>\
+                             <form id='lp-s1-form' method='POST' action='{server_base}/fake-post/'>\
+                             <input type='hidden' name='_lp_http2' value='v2'><input type='hidden' name='_lp_hop_index' value='1'></form>"
+                        )
+                    }
+                    ("POST", "/fake-post/")
+                        if request.contains("_lp_http2=v2")
+                            && request.contains("_lp_hop_index=1") =>
+                    {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        r#"<script>sc("lp-9z","cookie\/value",60); x.setAttribute('href',"https:\/\/x\/?lp_go=lp-9z");</script>"#.to_string()
+                    }
+                    ("GET", "/?lp_go=lp-9z") if request.contains("lp-9z=cookie/value") => {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        format!(
+                            "<script>setTimeout(function(){{window.location.replace(\"{destination}\\/r?key=k\");}},350);</script>"
+                        )
+                    }
+                    _ => String::new(),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let client = site::browser_client().unwrap();
+        let sid = Url::parse(&format!("{base}/?sid=abc")).unwrap();
+        let target = bypass_cloud(&client, &sid).await.unwrap();
+        assert_eq!(target.as_str(), format!("{target_base}/r?key=k"));
+        assert_eq!(hops.load(Ordering::SeqCst), 3);
+        // An unrecognized gate is a clear error, not a hang or a wrong URL.
+        let unknown = Url::parse(&format!("{base}/?sid=none")).unwrap();
+        assert!(bypass_cloud(&client, &unknown).await.is_err());
+        server.abort();
     }
 
     #[tokio::test]

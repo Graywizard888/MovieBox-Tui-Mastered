@@ -460,6 +460,34 @@ pub fn extract_4digit_year(raw: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Pixel height named by a release label or filename. Whole tokens only: substring matching
+/// turns site tags (`4KHDHub`) and flags (`HDR`, `SDR`) into bogus 4K/720p/480p tags. The first
+/// explicit height wins (`1080p ... 4K UHD` is 1080p); a bare `4K` token is only a fallback and
+/// the generic word `UHD` is never enough (UHDMovies brands 1080p encodes "1080p UHD").
+pub fn label_resolution(label: &str) -> Option<u64> {
+    let lower = label.to_ascii_lowercase();
+    let mut has_4k_token = false;
+    for token in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let height = match token {
+            "2160p" | "2160i" | "2160" => 2160,
+            "1440p" | "1440" => 1440,
+            "1080p" | "1080i" | "1080" => 1080,
+            "720p" | "720" => 720,
+            "576p" | "576" => 576,
+            "540p" | "540" => 540,
+            "480p" | "480" => 480,
+            "360p" => 360,
+            "4k" => {
+                has_4k_token = true;
+                continue;
+            }
+            _ => continue,
+        };
+        return Some(height);
+    }
+    has_4k_token.then_some(2160)
+}
+
 pub fn parse_size_bytes(text: &str) -> Option<u64> {
     let parts: Vec<&str> = text.split_whitespace().collect();
     for i in 0..parts.len() {

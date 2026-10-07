@@ -115,10 +115,14 @@ pub(super) fn post_with_aliases(
         .filter_map(|node| site::text(Some(node)))
         .collect();
 
-    // Only download buttons inside the post. Inline quality/category links often point to
-    // unrelated WordPress pages and must not be offered as playable releases.
-    let links: Vec<(String, String)> = document
-        .select(&BUTTONS)
+    // Only download buttons inside the post. Posts carry SEO paragraphs whose inline "4k",
+    // "2160p HEVC", "1080p UHD" or "3D Movies" links also point at the link gate but land on
+    // category pages. When the post has real maxbutton anchors, nothing else is a release.
+    let anchors: Vec<ElementRef<'_>> = document.select(&BUTTONS).collect();
+    let has_maxbuttons = anchors.iter().copied().any(is_maxbutton);
+    let links: Vec<(String, String, bool)> = anchors
+        .into_iter()
+        .filter(|button| !has_maxbuttons || is_maxbutton(*button))
         .filter_map(|button| {
             let href = button.value().attr("href")?;
             let url = site::provider_link(base, aliases, href)?;
@@ -129,18 +133,37 @@ pub(super) fn post_with_aliases(
             {
                 return None;
             }
-            Some((label_for(button), url.to_string()))
+            let (label, is_zip) = if is_maxbutton(button) {
+                let text = site::text(Some(button))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let class = button
+                    .value()
+                    .attr("class")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let zip = class.contains("zip") || text.contains("zip") || text.contains("pack");
+                (
+                    maxbutton_label(button).unwrap_or_else(|| label_for(button)),
+                    zip,
+                )
+            } else {
+                let label = label_for(button);
+                let zip = label.to_ascii_lowercase().contains("zip");
+                (label, zip)
+            };
+            Some((label, url.to_string(), is_zip))
         })
         .collect();
     let default_season = site::season_number(&raw_title).unwrap_or(1);
     let is_series = site::season_number(&raw_title).is_some()
         || links
             .iter()
-            .any(|(label, _)| site::episode_marker(label, default_season).is_some());
+            .any(|(label, _, _)| site::episode_marker(label, default_season).is_some());
 
     let mut releases: Vec<Release> = Vec::new();
-    for (label, href) in links {
-        if is_series && label.to_ascii_lowercase().contains("zip") {
+    for (label, href, is_zip) in links {
+        if is_series && is_zip {
             continue; // full-season archives are not playable episodes
         }
         let episode = if is_series {
@@ -196,6 +219,85 @@ pub(super) fn post_with_aliases(
         dubs: vec![],
     };
     Ok((details, releases))
+}
+
+fn is_maxbutton(anchor: ElementRef<'_>) -> bool {
+    anchor
+        .value()
+        .attr("class")
+        .is_some_and(|class| class.to_ascii_lowercase().contains("maxbutton"))
+}
+
+/// Current posts put each release's description ("Film (2010) 1080p 10bit … [7.07GB]") in the
+/// paragraph *before* the paragraph holding its "Download (G-Drive)" or "Episode N" buttons.
+/// Returns `None` when the button carries its own description (older markup).
+fn maxbutton_label(button: ElementRef<'_>) -> Option<String> {
+    if site::preceding_quality(button).is_some() {
+        return None;
+    }
+    let button_text = site::text(Some(button)).unwrap_or_default();
+    let mut block = button;
+    while let Some(parent) = block.parent().and_then(ElementRef::wrap) {
+        if parent.value().name() == "body"
+            || parent
+                .value()
+                .classes()
+                .any(|class| class == "entry-content")
+        {
+            break;
+        }
+        block = parent;
+    }
+    let mut description = None;
+    let mut sibling = site::previous_element(block);
+    for _ in 0..12 {
+        let Some(node) = sibling else { break };
+        sibling = site::previous_element(node);
+        // The previous release's buttons mean this release has no description of its own.
+        if node.select(&SIBLING_BUTTONS).any(is_maxbutton) {
+            break;
+        }
+        let Some(text) = site::text(Some(node)) else {
+            continue;
+        };
+        if text.len() <= 400
+            && (site::quality(&text).is_some()
+                || crate::providers::models::parse_size_bytes(&text).is_some()
+                || site::episode_marker(&text, 1).is_some())
+        {
+            description = Some(text);
+            break;
+        }
+    }
+    let description = description?;
+    let mut label = if site::episode_marker(&button_text, 1).is_some() {
+        format!("{description} {button_text}")
+    } else {
+        description
+    };
+    if site::season_number(&label).is_none()
+        && let Some(season) = season_heading(block)
+    {
+        label = format!("Season {season} {label}");
+    }
+    Some(label.chars().take(240).collect())
+}
+
+/// `<pre>SEASON 2</pre>` style headings precede the first release group of a season.
+fn season_heading(block: ElementRef<'_>) -> Option<usize> {
+    let mut sibling = site::previous_element(block);
+    for _ in 0..80 {
+        let node = sibling?;
+        sibling = site::previous_element(node);
+        if matches!(node.value().name(), "pre" | "h2" | "h3" | "h4")
+            && let Some(text) = site::text(Some(node))
+            && text.len() < 60
+            && let Some(season) = site::season_number(&text)
+        {
+            return Some(season);
+        }
+    }
+    None
 }
 
 fn label_for(button: ElementRef<'_>) -> String {
@@ -367,6 +469,102 @@ mod tests {
         assert_eq!(
             releases.iter().map(|r| r.episode).collect::<Vec<_>>(),
             vec![Some(8), Some(9)]
+        );
+    }
+
+    #[test]
+    fn current_movie_posts_ignore_decoy_tag_links_and_keep_each_release() {
+        let base = site::base_url("https://uhdmovies.example/").unwrap();
+        let html = r#"<h1 class="entry-title">Download Inception (2010) Dual Audio 1080p 10Bit || 2160p 4k HEVC Bluray Esubs</h1>
+            <div class="entry-content">
+            <p>Download <strong>Inception (2010)</strong> in <strong><span><a href="https://gate.example/?sid=decoy1">4k</a></span>
+               <a href="https://gate.example/?sid=decoy2"><span><span>2160p</span> HEVC</span></a></strong> and
+               <a href="https://gate.example/?sid=decoy3"><strong>UHDMOVIES</strong></a>.</p>
+            <h2>Download Inception 4k (2010) Hindi Dual Audio</h2>
+            <p> Inception (2010) 2160p HDR 10bit Bluray HEVC [DD 5.1 Hindi + DD 7.1 English] x265-<span><strong>UHDMovie</strong></span>s [<strong><span>17.5GB</span></strong>]
+            <p><span class='mb-center'><span class='mb-container'><a title="Download From Google Drive" class="maxbutton-1 maxbutton maxbutton-download-g-drive" href="https://gate.example/?sid=real1"><span class='mb-text'>Download (G-Drive)</span></a></span></span>
+            <hr />
+            <p> Inception (2010) 1080p 10bit Bluray [DD 5.1 Hindi + DD 5.1 English] x265-<span><strong>UHDMovies</strong></span> [<span><strong>7.07GB</strong></span>]
+            <p><span class='mb-center'><span class='mb-container'><a title="Download From Google Drive" class="maxbutton-1 maxbutton maxbutton-download-g-drive" href="https://gate.example/?sid=real2"><span class='mb-text'>Download (G-Drive)</span></a></span></span>
+            <p>Here you can download <a href="https://gate.example/?sid=decoy4"><strong>1080p x264 UHD</strong></a>,
+               <a href="https://gate.example/?sid=decoy5">4k 2160p</a> and <a href="https://gate.example/?sid=decoy6">3D Movies</a>.</p>
+            </div>"#;
+        let (details, releases) = post("/download-inception-2010/", &base, html).unwrap();
+        assert_eq!(details.media_type, MediaType::Movie);
+        assert_eq!(releases.len(), 2, "{releases:#?}");
+        assert_eq!(releases[0].quality.as_deref(), Some("2160p"));
+        assert_eq!(
+            releases[0].size_bytes,
+            Some((17.5 * 1_073_741_824.0) as u64)
+        );
+        assert_eq!(releases[1].quality.as_deref(), Some("1080p"));
+        assert_eq!(
+            releases[1].size_bytes,
+            Some((7.07 * 1_073_741_824.0) as u64)
+        );
+        assert!(releases[1].filename.starts_with("Inception (2010) 1080p"));
+        let urls: Vec<&str> = releases
+            .iter()
+            .flat_map(|r| r.mirrors.iter().map(|m| m.resolver_url.as_str()))
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://gate.example/?sid=real1",
+                "https://gate.example/?sid=real2"
+            ]
+        );
+    }
+
+    #[test]
+    fn current_series_posts_keep_episode_qualities_and_skip_decoys_and_zips() {
+        let base = site::base_url("https://uhdmovies.example/").unwrap();
+        let html = r#"<h1 class="entry-title">Download Breaking Bad (Season 01-05) Dual Audio 1080p</h1>
+            <div class="entry-content">
+            <p>Download in <a href="https://gate.example/?sid=decoy1">1080p UHD</a> x264</p>
+            <pre><b></b><span><b>SEASON 1</b></span></pre>
+            <p><strong><span> Breaking Bad S01 1080p BluRay REMUX AVC [Hindi] ESubs</span></strong><br />
+               <strong>[<span>11 </span><span>GB/<span>E</span></span>] [<span>73.07GB</span>/<span>Zip</span>]</strong></p>
+            <p><a class="maxbutton-2 maxbutton maxbutton-gdrive-episode" href="https://gate.example/?sid=a1"><span class='mb-text'>Episode 1</span></a>
+               <a class="maxbutton-2 maxbutton maxbutton-gdrive-episode" href="https://gate.example/?sid=a2"><span class='mb-text'>Episode 2</span></a>
+               <a class="maxbutton-3 maxbutton maxbutton-gdrive-zip" href="https://gate.example/?sid=zip"><span class='mb-text'>Zip / Pack</span></a></p>
+            <p><span><strong>Breaking Bad S01 720p BluRay x264 [Hindi] ESubs<br />[<span>3 GB/<span>E</span></span>]</strong></span></p>
+            <p><a class="maxbutton-2 maxbutton maxbutton-gdrive-episode" href="https://gate.example/?sid=b1"><span class='mb-text'>Episode 1</span></a>
+               <a class="maxbutton-2 maxbutton maxbutton-gdrive-episode" href="https://gate.example/?sid=b2"><span class='mb-text'>Episode 2</span></a></p>
+            </div>"#;
+        let (details, releases) = post("/download-breaking-bad/", &base, html).unwrap();
+        assert_eq!(details.media_type, MediaType::Series);
+        assert_eq!(details.seasons.len(), 1);
+        assert_eq!(details.seasons[0].episodes.len(), 2);
+        assert_eq!(releases.len(), 4, "{releases:#?}");
+        let first: Vec<_> = releases.iter().filter(|r| r.episode == Some(1)).collect();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].quality.as_deref(), Some("1080p"));
+        assert_eq!(first[0].size_bytes, Some(11 * 1_073_741_824));
+        assert_eq!(first[1].quality.as_deref(), Some("720p"));
+        assert!(releases.iter().all(|r| r.season == Some(1)));
+        assert!(
+            releases
+                .iter()
+                .flat_map(|r| &r.mirrors)
+                .all(|m| { !m.resolver_url.contains("zip") && !m.resolver_url.contains("decoy") })
+        );
+    }
+
+    #[test]
+    fn season_heading_supplies_the_season_when_descriptions_omit_it() {
+        let base = site::base_url("https://uhdmovies.example/").unwrap();
+        let html = r#"<h1 class="entry-title">Download Show (Season 01-02) 1080p</h1>
+            <div class="entry-content">
+            <pre>SEASON 2</pre>
+            <p><strong>Show 1080p WEB-DL [2 GB/E]</strong></p>
+            <p><a class="maxbutton maxbutton-gdrive-episode" href="https://gate.example/?sid=x1"><span class='mb-text'>Episode 4</span></a></p>
+            </div>"#;
+        let (_, releases) = post("/download-show/", &base, html).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            (releases[0].season, releases[0].episode),
+            (Some(2), Some(4))
         );
     }
 }
