@@ -4,10 +4,12 @@
 
 **Terminal interface to find, download, and stream movies, TV shows, and live TV using local media players.**
 
+A fork of [mesamirh/MovieBox-Tui](https://github.com/mesamirh/MovieBox-Tui).
+
 [ English ](README.md) • [ বাংলা ](README_BN.md) • [ हिन्दी ](README_HI.md) • [ Español ](README_ES.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/mesamirh/MovieBox-Tui/ci.yml?branch=main&label=CI&logo=github&style=flat)](https://github.com/mesamirh/MovieBox-Tui/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/moviebox-tui.svg?logo=rust&style=flat)](https://crates.io/crates/moviebox-tui)
+[![CI](https://img.shields.io/github/actions/workflow/status/Graywizard888/MovieBox-Tui-Mastered/ci.yml?branch=main&label=CI&logo=github&style=flat)](https://github.com/Graywizard888/MovieBox-Tui-Mastered/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Graywizard888/MovieBox-Tui-Mastered?label=release&logo=github&style=flat)](https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg?style=flat)](#license)
 [![Telegram](https://img.shields.io/badge/Telegram-Channel-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/getfromme)
 [![Support](https://img.shields.io/badge/Support-Crypto-F7931A?style=flat&logo=bitcoin&logoColor=white)](#optional-support)
@@ -37,30 +39,16 @@
 
 ### macOS & Linux
 
-If you have [Homebrew](https://brew.sh/) on macOS:
+Direct install via Terminal (no package manager needed):
 ```bash
-brew tap mesamirh/moviebox-tui https://github.com/mesamirh/MovieBox-Tui
-brew install moviebox-tui
-```
-
-> **Note:** If Homebrew prompts for tap verification on initial install, run `brew trust mesamirh/moviebox-tui`.
-
-Direct install via Terminal (macOS & Linux, no package manager needed):
-```bash
-curl -fsSL https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.sh | bash
 ```
 
 ### Windows
 
-If you have [Scoop](https://scoop.sh/) (recommended):
-```powershell
-scoop bucket add moviebox https://github.com/mesamirh/MovieBox-Tui
-scoop install moviebox-tui
-```
-
 Direct install via PowerShell (no package manager needed):
 ```powershell
-irm https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.ps1 | iex
 ```
 
 > **SmartScreen prompt:** If Windows displays *"Windows protected your PC"*, click **More info** → **Run anyway**.
@@ -68,7 +56,7 @@ irm https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.ps1 | i
 ### Android (Termux)
 ```bash
 pkg update && pkg install -y curl tar termux-tools termux-am
-curl -fsSL https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.sh | bash
 termux-setup-storage
 ```
 
@@ -76,13 +64,13 @@ termux-setup-storage
 <summary><b>Cargo & Source Build</b></summary>
 
 ```bash
-cargo install moviebox-tui --locked
+cargo install --git https://github.com/Graywizard888/MovieBox-Tui-Mastered --locked
 ```
 
 From source:
 ```bash
-git clone https://github.com/mesamirh/MovieBox-Tui.git
-cd MovieBox-Tui
+git clone https://github.com/Graywizard888/MovieBox-Tui-Mastered.git
+cd MovieBox-Tui-Mastered
 cargo build --release --locked
 ```
 
@@ -93,7 +81,7 @@ cargo build --release --locked
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify <archive-file> -R mesamirh/MovieBox-Tui
+gh attestation verify <archive-file> -R Graywizard888/MovieBox-Tui-Mastered
 ```
 
 </details>
@@ -103,11 +91,9 @@ gh attestation verify <archive-file> -R mesamirh/MovieBox-Tui
 
 Re-run install command (`curl ... | bash` or `irm ... | iex`) and select `2) Uninstall`.
 
-Or via package manager:
+If you installed with Cargo:
 ```bash
-brew uninstall moviebox-tui     # Homebrew
-scoop uninstall moviebox-tui    # Scoop
-cargo uninstall moviebox-tui    # Cargo
+cargo uninstall moviebox-tui
 ```
 
 </details>
@@ -123,7 +109,7 @@ moviebox-tui
 
 ## Documentation
 
-Full documentation at [**mesamirh.github.io/MovieBox-Tui**](https://mesamirh.github.io/MovieBox-Tui/) or [`docs/`](docs/):
+Full documentation in [`docs/`](docs/):
 
 | Guide | Description |
 | :--- | :--- |
@@ -137,7 +123,7 @@ Full documentation at [**mesamirh.github.io/MovieBox-Tui**](https://mesamirh.git
 
 ## Contributing
 
-Review [CONTRIBUTING.md](CONTRIBUTING.md) before submitting pull requests. Report bugs via [GitHub Issues](https://github.com/mesamirh/MovieBox-Tui/issues).
+Review [CONTRIBUTING.md](CONTRIBUTING.md) before submitting pull requests. Report bugs via [GitHub Issues](https://github.com/Graywizard888/MovieBox-Tui-Mastered/issues).
 
 <details>
 <summary><b>Support</b></summary>

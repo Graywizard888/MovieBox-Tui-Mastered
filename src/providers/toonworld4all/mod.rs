@@ -140,10 +140,9 @@ impl ToonWorld4AllClient {
         // WordPress permalinks normally end with '/', which is an empty final segment.
         let slug = url
             .path_segments()
-            .and_then(|segments| {
+            .and_then(|mut segments| {
                 segments
-                    .filter(|segment| !segment.is_empty())
-                    .next_back()
+                    .rfind(|segment| !segment.is_empty())
                     .map(str::to_string)
             })
             .filter(|slug| !slug.contains('/'))
