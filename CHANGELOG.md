@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **4KHDHub seeking**: when no mirror answers the byte-range probe (or the probe is slow, as on mobile networks), the chosen mirror is now routed through the seek proxy instead of being played non-seekable. The mirror probe also waits 6 s instead of 3.5 s so slow but seekable mirrors are not discarded.
+- **Resume in Android players (StreamX)**: the intent now carries a stable `media_identifier` and the title, so the player's own saved position matches the same title on the next launch. The local proxy port and tokenised mirror URLs change on every play, which made every launch look like a new video.
+- **Moviesmod "No exact release found"**: a failed download-page fetch is retried (up to three tries) and, if every page still fails, the provider reports a temporary failure instead of an empty list.
+
 ## [1.0.0] - 2026-10-07
 
 ### Added

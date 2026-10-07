@@ -192,7 +192,7 @@ impl FourKHdHubClient {
                         subtitle: None,
                         source_label: label,
                         max_height: None,
-                        seekable: None,
+                        seekable: Some(true),
                     });
                 }
                 fallbacks.push((is_seekable, resolved_score, playable_url, label, headers));
@@ -201,7 +201,7 @@ impl FourKHdHubClient {
 
         fallbacks
             .sort_by_key(|(is_seekable, resolved_score, _, _, _)| (!*is_seekable, *resolved_score));
-        if let Some((_, _, playable_url, label, headers)) = fallbacks.into_iter().next() {
+        if let Some((is_seekable, _, playable_url, label, headers)) = fallbacks.into_iter().next() {
             log::info!(
                 "4KHDHub fallback mirror playable: {label} ({})",
                 crate::logging::sanitize_url(&playable_url)
@@ -213,7 +213,7 @@ impl FourKHdHubClient {
                 subtitle: None,
                 source_label: label,
                 max_height: None,
-                seekable: None,
+                seekable: Some(is_seekable),
             });
         }
         log::error!(
@@ -336,7 +336,7 @@ impl FourKHdHubClient {
             Ok((final_url.to_string(), is_seekable))
         };
 
-        tokio::time::timeout(std::time::Duration::from_millis(3500), probe)
+        tokio::time::timeout(std::time::Duration::from_millis(6000), probe)
             .await
             .map_err(|_| {
                 FourKHdHubError::NoPlayableMirror("mirror preflight probe timed out (3.5s)".into())

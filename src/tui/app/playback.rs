@@ -486,6 +486,21 @@ impl App {
                     cmd.spawn()
                 };
             let is_android = matches!(kind, crate::tui::state::PlayerKind::AndroidIntent);
+            let android_media = history_item.as_ref().map(|item| {
+                // Same title -> same key on every launch, whatever the proxy port or token is.
+                let episode_tag = if item.season > 0 || item.episode > 0 {
+                    format!(" S{:02}E{:02}", item.season, item.episode)
+                } else {
+                    String::new()
+                };
+                crate::player::AndroidMedia {
+                    identifier: format!(
+                        "moviebox:{}:{}:{}:{}",
+                        item.provider, item.subject_id, item.season, item.episode
+                    ),
+                    title: format!("{}{episode_tag}", item.title),
+                }
+            });
             let command = crate::tui::player::command(
                 kind,
                 &effective_link,
@@ -511,6 +526,7 @@ impl App {
                     &effective_link,
                     effective_subtitle.as_deref(),
                     &headers,
+                    android_media.as_ref(),
                 );
                 let mut spawned = None;
                 let mut last_err = None;
@@ -547,6 +563,7 @@ impl App {
                     let fallback_link = effective_link.clone();
                     let fallback_sub = effective_subtitle.clone();
                     let fallback_headers = headers.clone();
+                    let fallback_media = android_media.clone();
                     tokio::task::spawn_blocking(move || {
                         let result = child.wait();
                         let error_output = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -625,6 +642,7 @@ impl App {
                                                 &fallback_link,
                                                 fallback_sub.as_deref(),
                                                 &fallback_headers,
+                                                fallback_media.as_ref(),
                                             );
                                         fallback_cmd.stdin(std::process::Stdio::null());
                                         fallback_cmd.stdout(std::process::Stdio::null());
