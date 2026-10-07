@@ -63,7 +63,7 @@ Enter `/settings` in the search bar or click `[ ⚙ Settings ]` on the Home scre
 | `MOVIEBOX_TOONWORLD4ALL_WORKER_URL` | Override ToonWorld4All redirect worker base URL (HTTPS) |
 | `MOVIEBOX_TOONWORLD4ALL_PREVIOUS_WORKER_URL` | Rebase worker redirects on an earlier worker origin |
 | `MOVIEBOX_TOONWORLD_COOKIE` | Cookies copied from a browser that already passed the ToonWorld4All archive's 24-hour ad gate (e.g. `user=...`). Sent only to the archive's own redirect pages; never logged. |
-| `MOVIEBOX_SEEK_PROXY_MAX_MB` | Largest file (MB, default `2048`) for which UHDMovies/Moviesmod/ToonWorld4All playback fakes seeking when the host cannot seek (see Players). `0` turns it off. |
+| `MOVIEBOX_SEEK_PROXY_MAX_MB` | Largest file (MB, default `5000`) for which UHDMovies/Moviesmod/ToonWorld4All playback fakes seeking when the host cannot seek (see Players). `0` turns it off. |
 | `MOVIEBOX_NO_IMAGE` | Set to `"1"` or `"true"` to disable terminal image previews |
 | `MOVIEBOX_IMAGE_PROTOCOL` | Force image protocol (`"kitty"`, `"sixel"`, `"iterm2"`, or `"off"`) |
 | `MOVIEBOX_CELL_SIZE` | Override font cell size for image scaling (e.g. `"10x20"`) |

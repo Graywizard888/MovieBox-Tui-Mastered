@@ -5,6 +5,8 @@
 ### Changed
 - **Faster seeks through the seek proxy**: the proxy keeps the origin connection from the previous request and reuses it when the next request is further into the file, so a forward seek skips only the gap instead of re-reading from the start. Rewinding still re-reads from the start. Measured on a live Moviesmod stream: forward seeks to 100/200/300/400 MB took 1.3/5.3/2.5/3.1 s before and 0.9/0.9/0.8/0.8 s after.
 
+- The default `MOVIEBOX_SEEK_PROXY_MAX_MB` is now 5000 (was 2048), so files up to about 4.9 GB seek through the proxy. Larger files are still played as-is.
+
 ### Fixed
 - **4KHDHub seeking**: when no mirror answers the byte-range probe (or the probe is slow, as on mobile networks), the chosen mirror is now routed through the seek proxy instead of being played non-seekable. The mirror probe also waits 6 s instead of 3.5 s so slow but seekable mirrors are not discarded.
 - **Resume in Android players (StreamX)**: the intent now carries a stable `media_identifier` and the title, so the player's own saved position matches the same title on the next launch. The local proxy port and tokenised mirror URLs change on every play, which made every launch look like a new video.
