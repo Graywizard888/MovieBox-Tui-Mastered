@@ -1,10 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.5] - 2026-10-07
 
 ### Fixed
 - The seek proxy only refuses the Matroska end-of-file index read while the player is still opening the file (before 64 MiB has been sent); a seek near the end after that is always answered.
 - A `build_only` run of the release workflow can rebuild a version that already has a release.
+- The installers (`install.sh`, `install.ps1`) and the README now use this repository; `install.sh` installs the `moviebox-tui` binary from the release archives.
 
 ## [1.0.4] - 2026-10-07
 
