@@ -7,6 +7,11 @@ on:
     paths:
       - "Cargo.toml"
   workflow_dispatch:
+    inputs:
+      build_only:
+        description: "Build and verify every artifact without creating a release"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -234,7 +239,7 @@ jobs:
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26d
+          ndk-version: r30
           add-to-path: false
 
       - name: Build Android binary
@@ -245,6 +250,9 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android24-clang"
           export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          # lld from the NDK: fold identical functions (smaller binary) and align segments to
+          # 16 KB so the same binary loads on 4 KB and 16 KB page-size devices.
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,--icf=all -C link-arg=-Wl,-z,max-page-size=16384"
 
           cargo build --release --all-features --locked --target aarch64-linux-android
 
@@ -253,6 +261,13 @@ jobs:
           BIN="target/aarch64-linux-android/release/moviebox-tui"
           readelf -lW "$BIN" | grep -F "PHDR" || { echo "::error::Missing PT_PHDR"; exit 1; }
           readelf -lW "$BIN" | grep -F "/system/bin/linker64" || { echo "::error::Missing Android PT_INTERP"; exit 1; }
+          while read -r align; do
+            if [ "$((align))" -lt 16384 ]; then
+              echo "::error::LOAD segment aligned below 16 KB ($align)"; exit 1
+            fi
+          done < <(readelf -lW "$BIN" | awk '/^ +LOAD/ { print $NF }')
+          readelf -lW "$BIN" | grep -E "^\s+LOAD"
+          ls -l "$BIN"
 
       - name: Archive Android
         run: |
@@ -271,7 +286,7 @@ jobs:
   release:
     name: Create Release
     needs: [check-version, build, build-macos-universal, build-android]
-    if: needs.check-version.outputs.is_new == 'true'
+    if: needs.check-version.outputs.is_new == 'true' && !inputs.build_only
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
