@@ -18,6 +18,23 @@ const MAX_CACHED_SEGMENTS: usize = 24;
 const MAX_SEGMENT_BYTES: usize = 16 * 1024 * 1024;
 const PREFETCH_LOOKAHEAD: u32 = 3;
 
+/// Largest file the proxy will fake range support for. Faking a seek means downloading and
+/// discarding every byte before the target, and players often probe the end of the file at
+/// startup (MKV cues), so the cost grows with the file size.
+pub const DEFAULT_SEEK_EMULATION_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Size limit for seek emulation from `MOVIEBOX_SEEK_PROXY_MAX_MB`; `0` turns it off.
+pub fn seek_emulation_limit() -> Option<u64> {
+    match std::env::var("MOVIEBOX_SEEK_PROXY_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(mb) => Some(mb.saturating_mul(1024 * 1024)),
+        None => Some(DEFAULT_SEEK_EMULATION_MAX_BYTES),
+    }
+}
+
 type CachedSegment = (String, String, Arc<[u8]>);
 type CachedManifest = (String, Arc<[u8]>);
 
@@ -77,6 +94,26 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// What the proxy learned about the main media file when seek emulation is on.
+enum SeekMode {
+    Unknown,
+    /// The host answered a plain GET with the whole file and no range support.
+    Emulate(MediaMeta),
+    /// Host honours ranges already, or the file is too large to fake: relay untouched.
+    Passthrough,
+}
+
+#[derive(Clone)]
+struct MediaMeta {
+    total: u64,
+    content_type: String,
+}
+
+struct SeekEmulation {
+    max_bytes: u64,
+    mode: tokio::sync::Mutex<SeekMode>,
+}
+
 #[derive(Clone)]
 struct ProxyContext {
     proxy_port: u16,
@@ -87,6 +124,7 @@ struct ProxyContext {
     max_height: Option<u64>,
     segment_cache: Arc<SegmentCache>,
     manifest_cache: Arc<Mutex<Option<CachedManifest>>>,
+    seek: Option<Arc<SeekEmulation>>,
 }
 struct ConnectionGuard {
     conns: Arc<AtomicUsize>,
@@ -107,6 +145,7 @@ pub fn spawn_sidecar(
     headers: &[(String, String)],
     subtitle_url: Option<&str>,
     max_height: Option<u64>,
+    seek_limit: Option<u64>,
 ) -> Result<(String, std::process::Child), String> {
     let exe = std::env::current_exe()
         .ok()
@@ -116,6 +155,7 @@ pub fn spawn_sidecar(
     let headers_json = serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_string());
     let sub_arg = subtitle_url.unwrap_or("");
     let height_arg = max_height.map(|h| h.to_string()).unwrap_or_default();
+    let seek_arg = seek_limit.map(|b| b.to_string()).unwrap_or_default();
 
     let mut cmd = Command::new(exe);
     cmd.args([
@@ -124,6 +164,7 @@ pub fn spawn_sidecar(
         &headers_json,
         sub_arg,
         &height_arg,
+        &seek_arg,
     ]);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -179,6 +220,7 @@ pub async fn run_sidecar(
     headers: Vec<(String, String)>,
     subtitle_url: Option<String>,
     max_height: Option<u64>,
+    seek_limit: Option<u64>,
 ) {
     let client = crate::net::http_client_builder_base()
         .http1_only()
@@ -229,6 +271,14 @@ pub async fn run_sidecar(
         max_height,
         segment_cache: Arc::new(SegmentCache::default()),
         manifest_cache: Arc::new(Mutex::new(None)),
+        seek: seek_limit
+            .filter(|_| !crate::player::is_dash_url(&target_url))
+            .map(|max_bytes| {
+                Arc::new(SeekEmulation {
+                    max_bytes,
+                    mode: tokio::sync::Mutex::new(SeekMode::Unknown),
+                })
+            }),
     };
 
     if crate::player::is_dash_url(&target_url) {
@@ -471,6 +521,27 @@ async fn handle_connection(
             }
         }
 
+        if let Some(seek) = ctx.seek.as_deref()
+            && forward_all_headers
+            && matches!(method, "GET" | "HEAD")
+            && let Some(keep_alive) = serve_seek_emulated(
+                &mut writer,
+                client,
+                auth_headers,
+                seek,
+                method,
+                &target_url,
+                range_header.as_deref(),
+                client_close,
+            )
+            .await?
+        {
+            if keep_alive {
+                continue;
+            }
+            return Ok(());
+        }
+
         let mut req = match method {
             "HEAD" => client.head(&target_url),
             _ => client.get(&target_url),
@@ -594,6 +665,190 @@ async fn handle_connection(
             return Ok(());
         }
     }
+}
+
+/// Parses a single `bytes=` range against a known size into inclusive `(start, end)`.
+/// `Err(())` means the range cannot be satisfied.
+fn resolve_range(header: Option<&str>, total: u64) -> Result<(u64, u64), ()> {
+    let Some(spec) = header.and_then(|h| h.trim().strip_prefix("bytes=")) else {
+        return Ok((0, total.saturating_sub(1)));
+    };
+    let Some((first, last)) = spec.split_once('-') else {
+        return Ok((0, total.saturating_sub(1)));
+    };
+    let (first, last) = (first.trim(), last.trim());
+    if spec.contains(',') {
+        // Multi-range requests are legal to answer with the whole body.
+        return Ok((0, total.saturating_sub(1)));
+    }
+    let (start, end) = if first.is_empty() {
+        let suffix: u64 = last.parse().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        (total.saturating_sub(suffix), total - 1)
+    } else {
+        let start: u64 = first.parse().map_err(|_| ())?;
+        let end = if last.is_empty() {
+            total.saturating_sub(1)
+        } else {
+            last.parse::<u64>()
+                .map_err(|_| ())?
+                .min(total.saturating_sub(1))
+        };
+        (start, end)
+    };
+    if total == 0 || start >= total || start > end {
+        return Err(());
+    }
+    Ok((start, end))
+}
+
+/// Streams bytes `start..start + length` of `res` (a response that begins at byte 0) to the
+/// player, discarding everything before `start`. `sent` counts body bytes written.
+async fn pump_range<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    res: reqwest::Response,
+    start: u64,
+    length: u64,
+    sent: &mut u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = res.bytes_stream();
+    let mut to_skip = start;
+    while *sent < length {
+        let chunk =
+            tokio::time::timeout(Duration::from_secs(CHUNK_IDLE_TIMEOUT_SECS), stream.next())
+                .await
+                .map_err(|_| "upstream idle")?
+                .ok_or("upstream ended early")??;
+        let mut chunk: &[u8] = &chunk;
+        if to_skip > 0 {
+            let skipped = to_skip.min(chunk.len() as u64);
+            chunk = &chunk[skipped as usize..];
+            to_skip -= skipped;
+        }
+        let take = (chunk.len() as u64).min(length - *sent) as usize;
+        if take > 0 {
+            writer.write_all(&chunk[..take]).await?;
+            writer.flush().await?;
+            *sent += take as u64;
+        }
+    }
+    Ok(())
+}
+
+/// Serves a host that streams front to back only as if it honoured byte ranges, so players
+/// can seek. A request for offset N is answered by reading the file from the start and
+/// discarding N bytes: nothing is written to disk, but a far seek costs download time.
+///
+/// Returns `Ok(Some(keep_alive))` when it answered, or `Ok(None)` when the request should
+/// be relayed as-is (the host already supports ranges, or the file is too large to fake).
+#[allow(clippy::too_many_arguments)]
+async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    client: &reqwest::Client,
+    auth_headers: &[(String, String)],
+    seek: &SeekEmulation,
+    method: &str,
+    target_url: &str,
+    range_header: Option<&str>,
+    client_close: bool,
+) -> Result<Option<bool>, Box<dyn std::error::Error + Send + Sync>> {
+    let open = |range: Option<&str>| {
+        let mut req = client.get(target_url);
+        for (name, val) in auth_headers {
+            req = req.header(name.as_str(), val.as_str());
+        }
+        if let Some(range) = range {
+            req = req.header("Range", range);
+        }
+        req.send()
+    };
+
+    let mut mode = seek.mode.lock().await;
+    let mut upstream = None;
+    if matches!(*mode, SeekMode::Unknown) {
+        // Forward the player's own range: a host that honours it answers 206 and needs no help.
+        let res = open(range_header).await?;
+        let total = res
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        *mode = match total {
+            Some(total) if res.status() == reqwest::StatusCode::OK && total <= seek.max_bytes => {
+                SeekMode::Emulate(MediaMeta {
+                    total,
+                    content_type: res
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/octet-stream")
+                        .to_string(),
+                })
+            }
+            _ => SeekMode::Passthrough,
+        };
+        if matches!(*mode, SeekMode::Emulate(_)) {
+            // A plain 200 starts at byte 0 whatever range was asked, so it can be reused.
+            upstream = Some(res);
+        }
+    }
+    let meta = match &*mode {
+        SeekMode::Emulate(meta) => meta.clone(),
+        _ => return Ok(None),
+    };
+    drop(mode);
+
+    let conn = if client_close { "close" } else { "keep-alive" };
+    let Ok((start, end)) = resolve_range(range_header, meta.total) else {
+        let response = format!(
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: {conn}\r\n\r\n",
+            meta.total
+        );
+        writer.write_all(response.as_bytes()).await?;
+        writer.flush().await?;
+        return Ok(Some(!client_close));
+    };
+    let length = end - start + 1;
+    let partial = range_header.is_some() && (start, end) != (0, meta.total.saturating_sub(1));
+    let status_line = if partial {
+        format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\n",
+            meta.total
+        )
+    } else {
+        "HTTP/1.1 200 OK\r\n".to_string()
+    };
+    let head = format!(
+        "{status_line}Content-Type: {}\r\nContent-Length: {length}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nConnection: {conn}\r\n\r\n",
+        meta.content_type
+    );
+    writer.write_all(head.as_bytes()).await?;
+    if method == "HEAD" {
+        writer.flush().await?;
+        return Ok(Some(!client_close));
+    }
+    writer.flush().await?;
+
+    // A far seek can spend a long time skipping, so one dropped connection is retried as long
+    // as the player has not received any body bytes yet.
+    let mut upstream = upstream;
+    let mut sent = 0u64;
+    for attempt in 0..2 {
+        let res = match upstream.take() {
+            Some(res) => res,
+            None => open(None).await?,
+        };
+        match pump_range(writer, res, start, length, &mut sent).await {
+            Ok(()) => break,
+            Err(error) if sent == 0 && attempt == 0 => {
+                log::warn!("seek emulation: upstream dropped while skipping, retrying: {error}");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Some(!client_close))
 }
 
 fn is_m4s_segment(url: &str) -> bool {
@@ -1412,6 +1667,235 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn resolve_range_handles_open_closed_suffix_and_invalid_ranges() {
+        assert_eq!(resolve_range(None, 1000), Ok((0, 999)));
+        assert_eq!(resolve_range(Some("bytes=0-"), 1000), Ok((0, 999)));
+        assert_eq!(resolve_range(Some("bytes=100-199"), 1000), Ok((100, 199)));
+        assert_eq!(resolve_range(Some("bytes=900-5000"), 1000), Ok((900, 999)));
+        assert_eq!(resolve_range(Some("bytes=-100"), 1000), Ok((900, 999)));
+        assert_eq!(resolve_range(Some("bytes=-5000"), 1000), Ok((0, 999)));
+        assert_eq!(resolve_range(Some("bytes=1000-"), 1000), Err(()));
+        assert_eq!(resolve_range(Some("bytes=500-100"), 1000), Err(()));
+        assert_eq!(resolve_range(Some("bytes=-0"), 1000), Err(()));
+        assert_eq!(resolve_range(Some("bytes=0-1,5-9"), 1000), Ok((0, 999)));
+    }
+
+    /// Serves `payload` for any path; honours `Range` only when `honor_range` is set,
+    /// mimicking hosts that stream front to back and ignore it.
+    async fn spawn_origin(payload: Arc<Vec<u8>>, honor_range: bool) -> std::net::SocketAddr {
+        use tokio::io::AsyncReadExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let data = Arc::clone(&payload);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let range = req.lines().find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("range: bytes=")
+                            .map(|v| v.trim().to_string())
+                    });
+                    let total = data.len();
+                    let hdr;
+                    let body: &[u8];
+                    match range.filter(|_| honor_range) {
+                        Some(r) => {
+                            let (s, e) = r.split_once('-').unwrap();
+                            let start: usize = s.parse().unwrap();
+                            let end = e.parse::<usize>().map_or(total - 1, |e| e.min(total - 1));
+                            body = &data[start..=end];
+                            hdr = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Type: video/x-matroska\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                        }
+                        None => {
+                            body = &data[..];
+                            hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: video/x-matroska\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+                            );
+                        }
+                    }
+                    let _ = socket.write_all(hdr.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
+                });
+            }
+        });
+        addr
+    }
+
+    async fn spawn_proxy(origin: std::net::SocketAddr, seek_limit: Option<u64>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ctx = ProxyContext {
+            proxy_port: port,
+            client: crate::net::http_client_builder_base()
+                .http1_only()
+                .build()
+                .unwrap(),
+            auth_headers: Arc::new(Vec::new()),
+            target_host: Some(origin.to_string()),
+            subtitle_url: None,
+            max_height: None,
+            segment_cache: Arc::new(SegmentCache::default()),
+            manifest_cache: Arc::new(Mutex::new(None)),
+            seek: seek_limit.map(|max_bytes| {
+                Arc::new(SeekEmulation {
+                    max_bytes,
+                    mode: tokio::sync::Mutex::new(SeekMode::Unknown),
+                })
+            }),
+        };
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, &ctx).await;
+                });
+            }
+        });
+        port
+    }
+
+    fn sample_payload() -> Arc<Vec<u8>> {
+        Arc::new((0..300_000u32).map(|i| (i % 251) as u8).collect())
+    }
+
+    #[tokio::test]
+    async fn seek_emulation_answers_ranges_for_a_host_that_ignores_them() {
+        let payload = sample_payload();
+        let origin = spawn_origin(Arc::clone(&payload), false).await;
+        let port = spawn_proxy(origin, Some(DEFAULT_SEEK_EMULATION_MAX_BYTES)).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+        let client = reqwest::Client::new();
+
+        // A plain GET gets the whole file and advertises range support.
+        let res = client.get(&url).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.headers()["accept-ranges"], "bytes");
+        assert_eq!(res.headers()["content-type"], "video/x-matroska");
+        assert_eq!(res.bytes().await.unwrap().as_ref(), payload.as_slice());
+
+        // A mid-file range is served as 206 with exactly the requested bytes.
+        let res = client
+            .get(&url)
+            .header("Range", "bytes=123456-124455")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 206);
+        assert_eq!(res.headers()["content-range"], "bytes 123456-124455/300000");
+        assert_eq!(
+            res.bytes().await.unwrap().as_ref(),
+            &payload[123456..=124455]
+        );
+
+        // Open-ended and suffix ranges (players read the end of the file for MKV cues).
+        let res = client
+            .get(&url)
+            .header("Range", "bytes=299000-")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 206);
+        assert_eq!(res.bytes().await.unwrap().as_ref(), &payload[299000..]);
+        let res = client
+            .get(&url)
+            .header("Range", "bytes=-500")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.headers()["content-range"], "bytes 299500-299999/300000");
+        assert_eq!(res.bytes().await.unwrap().as_ref(), &payload[299500..]);
+
+        let res = client
+            .get(&url)
+            .header("Range", "bytes=300000-")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 416);
+        assert_eq!(res.headers()["content-range"], "bytes */300000");
+
+        let res = client.head(&url).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.headers()["content-length"], "300000");
+        assert_eq!(res.headers()["accept-ranges"], "bytes");
+    }
+
+    #[tokio::test]
+    async fn seek_emulation_serves_the_first_range_request_from_the_start() {
+        let payload = sample_payload();
+        let origin = spawn_origin(Arc::clone(&payload), false).await;
+        let port = spawn_proxy(origin, Some(DEFAULT_SEEK_EMULATION_MAX_BYTES)).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+
+        // The very first request can already be a far range: the probe response is reused.
+        let res = reqwest::Client::new()
+            .get(&url)
+            .header("Range", "bytes=250000-250099")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 206);
+        assert_eq!(
+            res.bytes().await.unwrap().as_ref(),
+            &payload[250000..=250099]
+        );
+    }
+
+    #[tokio::test]
+    async fn seek_emulation_relays_hosts_that_already_support_ranges() {
+        let payload = sample_payload();
+        let origin = spawn_origin(Arc::clone(&payload), true).await;
+        let port = spawn_proxy(origin, Some(DEFAULT_SEEK_EMULATION_MAX_BYTES)).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+        let client = reqwest::Client::new();
+
+        for _ in 0..2 {
+            let res = client
+                .get(&url)
+                .header("Range", "bytes=1000-1999")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), 206);
+            assert_eq!(res.headers()["content-range"], "bytes 1000-1999/300000");
+            assert_eq!(res.bytes().await.unwrap().as_ref(), &payload[1000..2000]);
+        }
+    }
+
+    #[tokio::test]
+    async fn seek_emulation_leaves_oversized_files_untouched() {
+        let payload = sample_payload();
+        let origin = spawn_origin(Arc::clone(&payload), false).await;
+        let port = spawn_proxy(origin, Some(100_000)).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+
+        // Too big to fake: the host's own answer (whole file, no range support) is relayed.
+        let res = reqwest::Client::new()
+            .get(&url)
+            .header("Range", "bytes=1000-1999")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.headers().get("accept-ranges").is_none());
+        assert_eq!(res.bytes().await.unwrap().len(), payload.len());
+    }
+
     #[tokio::test]
     async fn test_warmup_dash_sidecar_populates_manifest_and_opening_segments() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1457,6 +1941,7 @@ mod tests {
             max_height: Some(720),
             segment_cache: Arc::new(SegmentCache::default()),
             manifest_cache: Arc::new(Mutex::new(None)),
+            seek: None,
         };
 
         warmup_dash_sidecar(&ctx, &target_url).await;

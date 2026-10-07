@@ -36,6 +36,7 @@ vlc --width=W --height=H --play-and-exit --network-caching=3000 --file-caching=3
 ```
 - **Headers**: Mapped to `--http-user-agent` and `--http-referrer`.
 - **DASH & CloudFront Streams**: Cookie-authenticated and DASH `.mpd` streams route through the local `StreamRelay` proxy sidecar (`127.0.0.1:<port>`) with HTTP/1.1 persistent connections (`Keep-Alive`), parallel `95 KB` `Range`-chunked `.m4s` segment fetching, lookahead segment prefetching (`N+1..N+3`), and resolution representation capping.
+- **Seeking on UHDMovies / Moviesmod / ToonWorld4All**: Playback first prefers a mirror that answers byte-range requests (Driveseed/Driveleech *Resume Cloud* workers), the same idea 4KHDHub uses. Some files only have the *Instant* mirror (Google's download CDN), which ignores `Range`, so no player can seek. For those the stream is routed through the loopback proxy, which answers range requests itself by re-reading the file from the start and discarding the bytes before the target. Nothing is written to disk and memory use stays flat. Costs: a seek forward takes as long as downloading the skipped part, and players that read the end of an MKV at startup (its index) wait for the whole file once. Files above `MOVIEBOX_SEEK_PROXY_MAX_MB` (default 2 GiB) are played as-is, without seeking. 4K releases are almost always above that limit.
 - **Subtitles**: Remote subtitles are pre-downloaded to temporary storage and passed via `--sub-file=<path>`.
 
 ### IINA (macOS)

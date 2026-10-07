@@ -561,12 +561,26 @@ async fn direct_links(client: &reqwest::Client, url: &Url) -> Vec<Url> {
     links
 }
 
+#[cfg(test)]
 async fn preflight(
     client: &reqwest::Client,
     url: &Url,
     mirror: &SourceMirror,
     intent: ResolutionIntent,
 ) -> Result<Url, ProviderError> {
+    preflight_seekable(client, url, mirror, intent)
+        .await
+        .map(|(url, _)| url)
+}
+
+/// Like [`preflight`], but also reports whether the host honoured the byte-range
+/// request (`206 Partial Content`). Players can only seek mid-stream on hosts that do.
+async fn preflight_seekable(
+    client: &reqwest::Client,
+    url: &Url,
+    mirror: &SourceMirror,
+    intent: ResolutionIntent,
+) -> Result<(Url, bool), ProviderError> {
     site::safe_url(url.as_str())?;
     if matches!(intent, ResolutionIntent::Download)
         && (url.path().ends_with(".m3u8") || url.path().ends_with(".mpd"))
@@ -588,6 +602,10 @@ async fn preflight(
         .error_for_status()
         .map_err(site::network_error)?;
     let final_url = site::safe_url(response.url().as_str())?;
+    let seekable = response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+        || response
+            .headers()
+            .contains_key(reqwest::header::CONTENT_RANGE);
     if final_url.path().to_ascii_lowercase().ends_with(".zip") {
         return Err(ProviderError::Unavailable(
             "Not a playable media file".into(),
@@ -658,7 +676,7 @@ async fn preflight(
             "Mirror is not a media file".into(),
         ));
     }
-    Ok(final_url)
+    Ok((final_url, seekable))
 }
 
 pub(super) async fn resolve_release(
@@ -675,7 +693,7 @@ pub(super) async fn resolve_release(
     let mut verification_error = None;
     for mirror in release.mirrors.iter().take(8) {
         match resolve_mirror(client, mirror, intent).await {
-            Ok((url, label)) => {
+            Ok((url, label, seekable)) => {
                 let mut headers = mirror.headers.clone();
                 if !headers
                     .iter()
@@ -693,6 +711,7 @@ pub(super) async fn resolve_release(
                     subtitle: None,
                     source_label: format!("{} • {label}", provider.label()),
                     max_height: release.quality.as_ref().map(|_| release.resolution_u64()),
+                    seekable: matches!(intent, ResolutionIntent::Playback).then_some(seekable),
                 });
             }
             Err(error) => {
@@ -710,16 +729,32 @@ pub(super) async fn resolve_release(
     }))
 }
 
+/// Accepts a probed media URL. Downloads take the first working link; playback only stops at
+/// one the host lets players seek in, remembering the first non-seekable link as a fallback.
+fn accept_media(
+    intent: ResolutionIntent,
+    (media, seekable): (Url, bool),
+    label: &str,
+    fallback: &mut Option<(Url, String)>,
+) -> Option<(Url, String, bool)> {
+    if seekable || matches!(intent, ResolutionIntent::Download) {
+        return Some((media, label.to_string(), seekable));
+    }
+    fallback.get_or_insert_with(|| (media, label.to_string()));
+    None
+}
+
 async fn resolve_mirror(
     client: &reqwest::Client,
     mirror: &SourceMirror,
     intent: ResolutionIntent,
-) -> Result<(Url, String), ProviderError> {
+) -> Result<(Url, String, bool), ProviderError> {
     let start = site::safe_url(&mirror.resolver_url)?;
     let mut pending = VecDeque::from([(start, 0_usize, mirror.label.clone())]);
     let mut visited = HashSet::new();
     let mut steps = 0;
     let mut verification_error = None;
+    let mut fallback = None;
     while let Some((url, depth, label)) = pending.pop_front() {
         if depth > 6 || steps >= MAX_STEPS || !visited.insert(url.to_string()) {
             continue;
@@ -746,8 +781,10 @@ async fn resolve_mirror(
             continue;
         }
         if is_media_url(&url) {
-            if let Ok(url) = preflight(client, &url, mirror, intent).await {
-                return Ok((url, label));
+            if let Ok(probed) = preflight_seekable(client, &url, mirror, intent).await
+                && let Some(found) = accept_media(intent, probed, &label, &mut fallback)
+            {
+                return Ok(found);
             }
             continue;
         }
@@ -761,8 +798,10 @@ async fn resolve_mirror(
             }
         };
         let Some(html) = page.html else {
-            if let Ok(url) = preflight(client, &page.url, mirror, intent).await {
-                return Ok((url, label));
+            if let Ok(probed) = preflight_seekable(client, &page.url, mirror, intent).await
+                && let Some(found) = accept_media(intent, probed, &label, &mut fallback)
+            {
+                return Ok(found);
             }
             continue;
         };
@@ -781,16 +820,17 @@ async fn resolve_mirror(
             continue;
         }
         let mut buttons = drive_buttons(&page.url, &html);
-        // Driveleech/Driveseed: prefer resumable worker links for downloads, instant for
-        // playback. Other buttons are tried if the preferred server is unavailable.
+        // Driveleech/Driveseed: prefer resumable worker links for both. Their workers answer
+        // byte-range requests (so players can seek) while the instant CDN streams only
+        // front-to-back. Other buttons are tried if the preferred server is unavailable.
         buttons.sort_by_key(|(name, _)| {
             let instant = name.contains("instant download");
             let resume = name.contains("resume cloud");
             match intent {
                 ResolutionIntent::Playback => {
-                    if instant {
+                    if resume {
                         0
-                    } else if resume {
+                    } else if instant {
                         1
                     } else {
                         2
@@ -841,9 +881,11 @@ async fn resolve_mirror(
             };
             for (next, name) in candidates {
                 found_buttons = true;
-                // Stop as soon as a button yields media; don't wait for every dead mirror.
-                if let Ok(media) = preflight(client, &next, mirror, intent).await {
-                    return Ok((media, name));
+                // Stop as soon as a button yields usable media; don't wait for every dead mirror.
+                if let Ok(probed) = preflight_seekable(client, &next, mirror, intent).await
+                    && let Some(found) = accept_media(intent, probed, &name, &mut fallback)
+                {
+                    return Ok(found);
                 }
                 if !is_media_url(&next) {
                     deferred.push((next, depth + 1, name));
@@ -863,6 +905,9 @@ async fn resolve_mirror(
         }
         pending.extend(deferred);
     }
+    if let Some((media, label)) = fallback {
+        return Ok((media, label, false));
+    }
     Err(verification_error
         .unwrap_or_else(|| ProviderError::Unavailable("No direct media URL found".into())))
 }
@@ -870,6 +915,47 @@ async fn resolve_mirror(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_waits_for_a_seekable_link_but_keeps_the_first_as_fallback() {
+        let instant = Url::parse("https://cdn.example/instant.mkv").unwrap();
+        let worker = Url::parse("https://worker.example/resume.mkv").unwrap();
+        let mut fallback = None;
+
+        assert!(
+            accept_media(
+                ResolutionIntent::Playback,
+                (instant.clone(), false),
+                "Instant",
+                &mut fallback
+            )
+            .is_none()
+        );
+        let (url, label, seekable) = accept_media(
+            ResolutionIntent::Playback,
+            (worker.clone(), true),
+            "Resume Cloud",
+            &mut fallback,
+        )
+        .unwrap();
+        assert_eq!(
+            (url, label.as_str(), seekable),
+            (worker, "Resume Cloud", true)
+        );
+        assert_eq!(fallback, Some((instant.clone(), "Instant".to_string())));
+
+        // Downloads never wait: the first working link wins whatever its range support.
+        let mut none = None;
+        let (url, _, seekable) = accept_media(
+            ResolutionIntent::Download,
+            (instant.clone(), false),
+            "Instant",
+            &mut none,
+        )
+        .unwrap();
+        assert_eq!((url, seekable), (instant, false));
+        assert!(none.is_none());
+    }
 
     #[test]
     fn resolution_future_is_send_for_spawned_playback_and_download() {

@@ -337,6 +337,11 @@ pub struct PlaybackSource {
     pub source_label: String,
     #[serde(default)]
     pub max_height: Option<u64>,
+    /// Whether the resolved host honours byte-range requests. `Some(false)` means
+    /// players cannot seek and playback should go through the seek-emulating proxy.
+    /// `None` means unknown, so the stream is played as-is.
+    #[serde(default)]
+    pub seekable: Option<bool>,
 }
 
 impl PlaybackSource {
@@ -348,6 +353,7 @@ impl PlaybackSource {
             subtitle,
             source_label: provider.label().to_string(),
             max_height: None,
+            seekable: None,
         }
     }
 }

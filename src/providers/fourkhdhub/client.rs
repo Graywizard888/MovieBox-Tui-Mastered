@@ -192,6 +192,7 @@ impl FourKHdHubClient {
                         subtitle: None,
                         source_label: label,
                         max_height: None,
+                        seekable: None,
                     });
                 }
                 fallbacks.push((is_seekable, resolved_score, playable_url, label, headers));
@@ -212,6 +213,7 @@ impl FourKHdHubClient {
                 subtitle: None,
                 source_label: label,
                 max_height: None,
+                seekable: None,
             });
         }
         log::error!(

@@ -78,9 +78,14 @@ async fn main() -> std::io::Result<()> {
             .get(pos + 4)
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&h| h > 0);
+        let seek_limit = args
+            .get(pos + 5)
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&b| b > 0);
         let headers: Vec<(String, String)> =
             serde_json::from_str(&headers_json).unwrap_or_default();
-        moviebox_tui::proxy::run_sidecar(target_url, headers, sub_url, max_height).await;
+        moviebox_tui::proxy::run_sidecar(target_url, headers, sub_url, max_height, seek_limit)
+            .await;
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {

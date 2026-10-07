@@ -774,6 +774,7 @@ impl App {
                             subtitle: sub_url,
                             source_label: "Direct".to_string(),
                             max_height: None,
+                            seekable: None,
                         };
                         self.dispatch_playback_or_notify(source);
                     }
@@ -828,6 +829,7 @@ impl App {
                                 subtitle: None,
                                 source_label: "Live TV".to_string(),
                                 max_height: None,
+                                seekable: None,
                             };
                             self.dispatch_playback_or_notify(source);
                             return None;
@@ -914,6 +916,7 @@ impl App {
                     subtitle: None,
                     source_label: "Live TV".to_string(),
                     max_height: None,
+                    seekable: None,
                 };
                 self.dispatch_playback_or_notify(source);
                 return;
