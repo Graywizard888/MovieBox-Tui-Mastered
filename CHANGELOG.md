@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.1] - 2026-10-07
 
 ### Changed
 - **Faster seeks through the seek proxy**: the proxy keeps the origin connection from the previous request and reuses it when the next request is further into the file, so a forward seek skips only the gap instead of re-reading from the start. Rewinding still re-reads from the start. Measured on a live Moviesmod stream: forward seeks to 100/200/300/400 MB took 1.3/5.3/2.5/3.1 s before and 0.9/0.9/0.8/0.8 s after.
