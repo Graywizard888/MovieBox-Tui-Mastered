@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.0] - 2026-10-07
+
+### Added
+- **Seeking on UHDMovies, Moviesmod and ToonWorld4All**: playback now prefers a mirror that answers byte-range requests (Driveseed/Driveleech *Resume Cloud* workers), as 4KHDHub already did. Files that only have the non-seekable *Instant* mirror are routed through the loopback proxy (`src/proxy.rs`), which answers `Range` requests itself by discarding the bytes before the target. Nothing is written to disk. Files above `MOVIEBOX_SEEK_PROXY_MAX_MB` (default 2048) are played as-is.
+- **Season quality prompt**: pressing download on a season for UHDMovies, Moviesmod or ToonWorld4All asks which quality to use and applies it to every episode in the queue.
+- **ToonWorld4All archive qualities**: every advertised encode (codec and size) is listed from the archive page, and `MOVIEBOX_TOONWORLD_COOKIE` lets a browser session that passed the site's ad gate be used for link resolution.
+
+### Changed
+- In-app update checks, release downloads, installers (`install.sh`, `install.ps1`) and the Settings repository link now use `Graywizard888/MovieBox-Tui-Mastered`.
+- Downloads from resolved WordPress-provider hosts are named by their real container (`.mkv`) from the host's response headers instead of always `.mp4`.
+
+### Fixed
+- UHDMovies and Moviesmod link resolution through the current LinkPilot link gate (generic form and cookie walker), and removal of decoy tag links that were parsed as releases.
+- Wrong `4K` tags on 1080p releases (UHDMovies, 4KHDHub, search-card badges): resolution is now detected by whole token instead of substring.
+- A failed link resolution in the middle of a season download now halts the queue cleanly instead of silently ignoring the next download.
+
 ## [0.1.25] - 2026-09-27
 
 ### Fixed
