@@ -12,6 +12,7 @@
 
 - [Content Providers](providers.md)
 - [Hardware Players](players.md)
+- [Up Next & Autoplay](up-next.md)
 - [Batch Downloads](downloads.md)
 - [Stremio Addons](addons-mode.md)
 - [Live TV & IPTV](tv-mode.md)

@@ -1,4 +1,5 @@
 use super::App;
+use crate::player::upnext::PlayNextRequest;
 use crate::providers::models::ProviderKind;
 use crate::tui::text::parse_duration_seconds;
 use crate::tui::{action::Action, overlay::NotificationKind, state::Screen};
@@ -229,6 +230,59 @@ impl App {
         })
     }
 
+    /// Act on a "play next episode" request written by the mpv overlay script
+    /// when it had no directly playable URL for the next episode.
+    pub(super) fn handle_upnext_request(&mut self, request: PlayNextRequest) {
+        if self.state.is_tv_mode || request.episode == 0 {
+            return;
+        }
+        let Some(subject_id) = self.state.active_subject_id.clone() else {
+            return;
+        };
+        // Never act on a request that belongs to a different title.
+        if !request.subject_id.is_empty() && request.subject_id != subject_id {
+            return;
+        }
+
+        let season = if request.season > 0 { request.season } else { 1 };
+        let label = crate::player::upnext::episode_label(season, request.episode);
+
+        self.state.selected_season = season;
+        self.state.selected_episode = request.episode;
+
+        let season_idx = self
+            .state
+            .available_seasons
+            .iter()
+            .position(|entry| entry.number == season)
+            .unwrap_or(season.saturating_sub(1));
+        self.state.season_list_state.select(Some(season_idx));
+
+        let episode_idx = self
+            .state
+            .available_episode_numbers
+            .get(season_idx)
+            .and_then(|episodes| episodes.iter().position(|&ep| ep == request.episode))
+            .unwrap_or(request.episode.saturating_sub(1));
+        self.state.episode_list_state.select(Some(episode_idx));
+
+        self.state.is_playing = false;
+        self.state.auto_play_on_ready = true;
+        self.state
+            .set_status_default(format!("Loading next episode {label}..."));
+        self.state
+            .notify(NotificationKind::Info, "Up Next", format!("Starting {label}"));
+
+        self.action_sender
+            .send(Action::FetchEpisodeStreams {
+                subject_id,
+                season,
+                episode: request.episode,
+                force_refresh: false,
+            })
+            .ok();
+    }
+
     pub(super) fn launch_player(
         &mut self,
         kind: crate::tui::state::PlayerKind,
@@ -280,6 +334,26 @@ impl App {
             self.state
                 .history
                 .record_start(item, resume_seconds.unwrap_or(0));
+        }
+
+        // Publish the following episode for the player-side "Up Next" overlay.
+        // Network streams have no directory for the script to scan, so without
+        // this it can only ever report "Season Ended".
+        if let Some(item) = &history_item {
+            let sidecar = crate::player::upnext::build(
+                &item.provider,
+                &item.subject_id,
+                &item.title,
+                &self.state.available_seasons,
+                item.season,
+                item.episode,
+                Some(link.clone()),
+            );
+            tokio::task::spawn_blocking(move || crate::player::upnext::publish(&sidecar));
+        } else {
+            // Live TV and anything without series context: overwrite the
+            // sidecar so a previous episode cannot be mistaken for this stream.
+            tokio::task::spawn_blocking(|| crate::player::upnext::publish_absent("", "", "", 0, 0));
         }
 
         if matches!(kind, crate::tui::state::PlayerKind::Mpv)

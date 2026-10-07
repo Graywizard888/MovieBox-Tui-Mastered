@@ -27,6 +27,17 @@ impl App {
                         self.state.clear_poster_protocols();
                     }
                 }
+
+                // The mpv "Up Next" overlay asks for the following episode by
+                // dropping a request file. Poll once per second, and only while
+                // a streaming title is open, to keep the idle loop free of IO.
+                if self.state.tick_count % 10 == 0
+                    && !self.state.is_tv_mode
+                    && self.state.active_subject_id.is_some()
+                    && let Some(request) = crate::player::upnext::take_request()
+                {
+                    self.handle_upnext_request(request);
+                }
                 if needs_redraw {
                     self.state.dirty = true;
                 }

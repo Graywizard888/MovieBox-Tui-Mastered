@@ -9,6 +9,7 @@ local opts = {
     season = 0,
     episode = 0,
     state_file = "",
+    upnext_file = "",
 }
 options.read_options(opts, "moviebox")
 

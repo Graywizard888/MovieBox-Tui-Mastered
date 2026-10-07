@@ -1,4 +1,5 @@
 pub mod tracker;
+pub mod upnext;
 
 use std::{path::Path, process::Command};
 
@@ -523,8 +524,15 @@ fn mpv_command(
             if let Some(state_file) =
                 tracker::state_file_path(provider, subject_id, season, episode)
             {
-                let opts =
+                let mut opts =
                     format_mpv_script_opts(provider, subject_id, season, episode, &state_file);
+                // Lets the "Up Next" overlay script find the sidecar without
+                // probing well-known paths (desktop launches only; Android
+                // intents cannot carry script options).
+                if let Some(upnext_file) = upnext::primary_sidecar_path() {
+                    let upnext_str = normalize_player_path(&upnext_file.to_string_lossy());
+                    opts.push_str(&format!(",moviebox-upnext_file={upnext_str}"));
+                }
                 command.arg(format!("{prefix}script-opts={opts}"));
             }
         }
