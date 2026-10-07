@@ -381,22 +381,23 @@ fn parse_season_episode(value: &str) -> Option<(usize, usize)> {
 }
 
 fn detect_quality(value: &str) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    if lower.contains("2160p")
-        || lower.contains("2160")
-        || lower.contains("4k")
-        || lower.contains("uhd")
-    {
-        Some("2160p".to_string())
-    } else if lower.contains("1080p") || lower.contains("1080") || lower.contains("fhd") {
-        Some("1080p".to_string())
-    } else if lower.contains("720p") || lower.contains("720") || lower.contains("hd") {
-        Some("720p".to_string())
-    } else if lower.contains("480p") || lower.contains("480") || lower.contains("sd") {
-        Some("480p".to_string())
-    } else {
-        None
+    // Whole-token detection. Filenames carry the site tag `4KHDHub.Com` and encoder tags such
+    // as `DS4K`, plain `UHD` branding on 1080p encodes, and `HDR`/`SDR` flags; none of those
+    // describe the video resolution, and substring matching tagged 1080p files as 2160p.
+    if let Some(height) = crate::providers::models::label_resolution(value) {
+        return Some(format!("{height}p"));
     }
+    value
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(|token| match token {
+            "uhd" => Some("2160p"),
+            "fhd" => Some("1080p"),
+            "hd" => Some("720p"),
+            "sd" => Some("480p"),
+            _ => None,
+        })
+        .map(str::to_string)
 }
 
 fn detect_codec(value: &str) -> Option<String> {
@@ -599,5 +600,54 @@ mod tests {
         assert_eq!(detect_quality("Film.720p.HD.x264").as_deref(), Some("720p"));
         assert_eq!(detect_quality("Old.Show.480p.SD").as_deref(), Some("480p"));
         assert_eq!(detect_quality("Unknown.Release.Title"), None);
+        // Real 4KHDHub filenames that used to be tagged 2160p.
+        for (name, expected) in [
+            (
+                "Inception (2010) 1080p BluRay REMUX VC-1 [Hindi DDP 5.1 + English DTS-HD MA 5.1] (FraMeSToR-4KHDHub).mkv",
+                "1080p",
+            ),
+            (
+                "Inception (2010) 1080p UHD BluRay HDR 10bit HEVC [Hindi DDP 5.1 + English DDP 5.1] x265 (TnP-4KHDHub).mkv",
+                "1080p",
+            ),
+            (
+                "Inception.2010.1080p.10bit.DS4K.BluRay.[Org.DDP5.1-Hindi+DDP5.1-English].ESub.HEVC-The.PunisheR.mkv",
+                "1080p",
+            ),
+            (
+                "Breaking Bad S01E01 1080p BluRay REMUX AVC [Hindi DD 2.0 + English DTS-HD.MA 5.1] x264 (FraMeSToR-4kHdHub.com).mkv",
+                "1080p",
+            ),
+            (
+                "El.Camino.A.Breaking.Bad.Movie.2019.1080p.NF.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-4kHdHub.Com.mkv",
+                "1080p",
+            ),
+            (
+                "[144FPS].The Avengers 2012 BluRay 1080p Dual Audio [Hindi DDP 5.1 + English DDP 5.1] x264 ESub.Homelander-4KHDHub.Com",
+                "1080p",
+            ),
+            (
+                "Avengers - Infinity War (2018) 1080p UHD HDR10 BluRay x265 10bit HEVC [Org Hindi BD 5.1 ~ 640Kbps] MSubs ~ d3g",
+                "1080p",
+            ),
+            // Genuine 4K releases keep their tag.
+            (
+                "Inception (2010) 2160p UHD BluRay REMUX DV HDR 10bit HEVC x265 (FraMeSToR-4KHDHub).mkv",
+                "2160p",
+            ),
+            (
+                "[4K][60FPS].Avengers.Age.of.Ultron.2015.2160p.10bit.SDR.BluRay.x265.Dual.[Eng+Hin].Esub.Homelander",
+                "2160p",
+            ),
+            (
+                "Avengers - Infinity War (2018) 2160p 4K UHD HDR10 DV BluRay REMUX x265 10bit HEVC",
+                "2160p",
+            ),
+            ("Some.Movie.4K.HDR.x265.mkv", "2160p"),
+        ] {
+            assert_eq!(detect_quality(name).as_deref(), Some(expected), "{name}");
+        }
+        assert_eq!(detect_quality("Film.4KHDHub.Com.mkv"), None);
+        assert_eq!(detect_quality("Film.HDR10.SDR.mkv"), None);
     }
 }
