@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="MovieBox-Tui"
 BIN_NAME="moviebox-tui"
-REPO="Graywizard888/MovieBox-Tui"
+REPO="Graywizard888/MovieBox-Tui-Mastered"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 
 VERSION=""
@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
 MovieBox-TUI Installer
 
 USAGE:
-    curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui/main/install.sh | bash -s -- [OPTIONS]
+    curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.sh | bash -s -- [OPTIONS]
     ./install.sh [OPTIONS]
 
 OPTIONS:
