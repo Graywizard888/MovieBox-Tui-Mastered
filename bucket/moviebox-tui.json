@@ -1,5 +1,5 @@
 {
-  "version": "0.1.25",
+  "version": "1.0.4",
   "description": "Terminal interface to find, download, and stream movies, TV shows, and live TV",
   "homepage": "https://github.com/mesamirh/MovieBox-Tui",
   "license": "MIT|Apache-2.0",
@@ -8,12 +8,12 @@
   },
   "architecture": {
     "64bit": {
-      "url": "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.25/MovieBox_Windows_x64.zip",
-      "hash": "d5e32ab4c09c93527186aa3cac0c8e3e37d6a0cc967426a78804fa172f1e564e"
+      "url": "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v1.0.4/MovieBox_Windows_x64.zip",
+      "hash": "089b1845c1a8121f7659ca62f94c57f059c320848971ed607f57e15cc4532d89"
     },
     "arm64": {
-      "url": "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.25/MovieBox_Windows_arm64.zip",
-      "hash": "c65ca7a4c641a563ac380f0c245e6b3ca9da2f999a202a4edb1b11856c523c18"
+      "url": "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v1.0.4/MovieBox_Windows_arm64.zip",
+      "hash": "4b4919c2c7fa1d15151731073699ce0db7bd4cfcac2a7ac0710830df23f31d33"
     }
   },
   "bin": "moviebox-tui.exe",
