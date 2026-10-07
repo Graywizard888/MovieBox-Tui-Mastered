@@ -123,6 +123,9 @@ struct SeekEmulation {
     rate_bps: AtomicU64,
     /// Longest wait an end-of-file read may cost before it is refused (see `end_probe_blocked`).
     end_probe_wait: Duration,
+    /// File bytes sent to players so far. Only the first `startup_bytes` count as "opening".
+    delivered: AtomicU64,
+    startup_bytes: u64,
 }
 
 impl SeekEmulation {
@@ -135,6 +138,8 @@ impl SeekEmulation {
             matroska: AtomicBool::new(false),
             rate_bps: AtomicU64::new(0),
             end_probe_wait: end_probe_wait(),
+            delivered: AtomicU64::new(0),
+            startup_bytes: STARTUP_PHASE_BYTES,
         }
     }
 }
@@ -142,6 +147,9 @@ impl SeekEmulation {
 /// How far from the end of the file a read counts as the player looking for the index.
 const END_PROBE_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_END_PROBE_WAIT_SECS: u64 = 15;
+/// The player is still opening the file until it has been sent this much. After that a request
+/// near the end is a seek the user asked for, and is always answered.
+const STARTUP_PHASE_BYTES: u64 = 64 * 1024 * 1024;
 /// Speed assumed for the wait estimate until the origin has been timed.
 const ASSUMED_RATE_BPS: u64 = 5 * 1024 * 1024;
 const MIN_RATE_SAMPLE_BYTES: u64 = 256 * 1024;
@@ -164,7 +172,7 @@ fn is_matroska_content_type(content_type: &str) -> bool {
 
 /// Whether a request for `start..` should be refused instead of answered by downloading and
 /// discarding the file up to there. Matroska players read the index at the end of the file while
-/// opening, which on a host without ranges means the whole download before the first frame;
+/// opening (the caller only applies this during that startup phase), which on a host without ranges means the whole download before the first frame;
 /// refused, they play from the start and find their place by scanning. `from` is the offset the
 /// origin connection we would use has already reached.
 fn end_probe_blocked(total: u64, start: u64, from: u64, rate_bps: u64, max_wait: Duration) -> bool {
@@ -908,7 +916,10 @@ async fn pump_range<W: AsyncWriteExt + Unpin>(
     while *sent < length {
         if !up.leftover.is_empty() {
             let chunk = std::mem::take(&mut up.leftover);
-            consume_chunk(writer, up, &chunk, start, length, sent).await?;
+            let before = *sent;
+            let written = consume_chunk(writer, up, &chunk, start, length, sent).await;
+            seek.delivered.fetch_add(*sent - before, Ordering::Relaxed);
+            written?;
             continue;
         }
         let next =
@@ -938,7 +949,10 @@ async fn pump_range<W: AsyncWriteExt + Unpin>(
             let rate = (received as f64 / elapsed.as_secs_f64()) as u64;
             seek.rate_bps.store(rate.max(1), Ordering::Relaxed);
         }
-        consume_chunk(writer, up, &chunk, start, length, sent).await?;
+        let before = *sent;
+        let written = consume_chunk(writer, up, &chunk, start, length, sent).await;
+        seek.delivered.fetch_add(*sent - before, Ordering::Relaxed);
+        written?;
     }
     Ok(())
 }
@@ -1022,6 +1036,7 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
     };
     if range_header.is_some()
         && seek.matroska.load(Ordering::Relaxed)
+        && seek.delivered.load(Ordering::Relaxed) < seek.startup_bytes
         && end_probe_blocked(
             meta.total,
             start,
@@ -2415,6 +2430,50 @@ mod tests {
         assert_eq!(
             middle.bytes().await.unwrap().as_ref(),
             &payload[1_000_000..1_001_000]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seek_near_the_end_after_startup_is_always_answered() {
+        let mut bytes: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
+        bytes[..4].copy_from_slice(&EBML_MAGIC);
+        let payload = Arc::new(bytes);
+        let origin = spawn_origin(Arc::clone(&payload), false).await;
+        let seek = SeekEmulation {
+            end_probe_wait: Duration::ZERO,
+            startup_bytes: 1_000_000,
+            ..SeekEmulation::new(DEFAULT_SEEK_EMULATION_MAX_BYTES)
+        };
+        let port = spawn_proxy_with(origin, Some(Arc::new(seek))).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+        let get = |range: String| {
+            let url = url.clone();
+            async move {
+                reqwest::Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .build()
+                    .unwrap()
+                    .get(&url)
+                    .header("Range", range)
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+        let total = payload.len();
+        let tail = format!("bytes={}-", total - 200_000);
+
+        // While the player is still opening the file the index read is refused ...
+        assert_eq!(get(tail.clone()).await.status(), 416);
+        // ... but once it has been sent more than the startup allowance, a seek there is real.
+        let playing = get("bytes=0-1999999".into()).await;
+        assert_eq!(playing.status(), 206);
+        playing.bytes().await.unwrap();
+        let late = get(tail).await;
+        assert_eq!(late.status(), 206);
+        assert_eq!(
+            late.bytes().await.unwrap().as_ref(),
+            &payload[total - 200_000..]
         );
     }
 

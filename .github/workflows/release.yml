@@ -32,7 +32,8 @@ jobs:
           VERSION=$(grep '^version =' Cargo.toml | head -1 | awk -F'"' '{print $2}')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          if gh release view "v$VERSION" --repo "${{ github.repository }}" &>/dev/null; then
+          # A build-only run never creates a release, so it may rebuild a released version.
+          if [ "$BUILD_ONLY" != "true" ] && gh release view "v$VERSION" --repo "${{ github.repository }}" &>/dev/null; then
             echo "is_new=false" >> $GITHUB_OUTPUT
             echo "Release v$VERSION already exists. Skipping build."
           else
@@ -41,6 +42,7 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_ONLY: ${{ inputs.build_only }}
 
   preflight:
     name: Release preflight
