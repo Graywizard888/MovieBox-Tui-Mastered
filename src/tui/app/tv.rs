@@ -9,7 +9,7 @@ impl App {
         self.state.show_provider_popup = false;
         self.state.provider_list_state.select(None);
         self.state.show_settings_popup = false;
-        self.state.settings_download_dir_input = None;
+        self.state.settings_text_input = None;
         self.state.player_picker_popup = false;
         self.state.settings_player_picker = false;
 

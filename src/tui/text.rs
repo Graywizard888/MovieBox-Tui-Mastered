@@ -366,6 +366,25 @@ pub fn truncate_width<'a>(value: &'a str, max_width: usize) -> Cow<'a, str> {
     Cow::Owned(output)
 }
 
+/// Keeps the end of `value` within `max_width` columns, marking the cut with a leading `…`.
+pub fn tail_width(value: &str, max_width: usize) -> String {
+    if width(value) <= max_width {
+        return value.to_string();
+    }
+    let mut kept = Vec::new();
+    let mut used = 1;
+    for grapheme in value.graphemes(true).rev() {
+        let w = width(grapheme);
+        if used + w > max_width {
+            break;
+        }
+        kept.push(grapheme);
+        used += w;
+    }
+    kept.reverse();
+    format!("…{}", kept.concat())
+}
+
 pub fn truncate_middle_width(value: &str, max_width: usize) -> String {
     if width(value) <= max_width {
         return value.to_string();

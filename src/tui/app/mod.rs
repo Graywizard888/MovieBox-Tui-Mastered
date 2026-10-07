@@ -230,6 +230,7 @@ impl App {
         state.iina_path = config.iina_path;
         state.download_dir = config.download_dir.map(std::path::PathBuf::from);
         state.installed_addons = crate::config::load_addons();
+        crate::providers::toonworld4all::cookie::load();
 
         let env_theme = std::env::var("MOVIEBOX_THEME")
             .ok()

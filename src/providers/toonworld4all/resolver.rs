@@ -9,6 +9,7 @@ use super::super::models::{
     PlaybackSource, ProviderError, ProviderKind, Release, ResolutionIntent, SourceMirror,
 };
 use super::super::{drive, site};
+use super::cookie;
 use super::parser::{self, Origins};
 
 pub(super) fn supported_host(url: &Url) -> bool {
@@ -60,21 +61,39 @@ fn allowed_target(url: &Url, origins: &Origins) -> bool {
 }
 
 fn shortener_error() -> ProviderError {
-    ProviderError::Unavailable(
-        "Mirror requires an interactive ad shortener; solve it once in a browser and set \
-         MOVIEBOX_TOONWORLD_COOKIE to that browser's archive.toonworld4all.me cookies, or \
-         choose another mirror or quality"
-            .into(),
-    )
+    ProviderError::Unavailable(shortener_message(
+        cookie::from_env().is_some(),
+        cookie::current().map(|saved| saved.age_secs(cookie::now_secs())),
+    ))
+}
+
+/// `saved_age` is the age in seconds of the cookie saved in Settings, if any.
+fn shortener_message(env_cookie_set: bool, saved_age: Option<u64>) -> String {
+    match saved_age {
+        Some(age) if !env_cookie_set && age >= cookie::COOKIE_TTL_SECS => format!(
+            "Mirror requires the archive ad gate and the saved ToonWorld cookie is {}h old, so \
+             its 24-hour pass has likely expired; pass the gate in a browser again and paste a \
+             fresh cookie in Settings (General > ToonWorld Cookie)",
+            age / 3600
+        ),
+        Some(age) if !env_cookie_set => format!(
+            "Mirror still hit the archive ad gate with the saved ToonWorld cookie ({}h old); \
+             copy the cookie again from the archive site right after passing the gate, or \
+             choose another mirror or quality",
+            age / 3600
+        ),
+        _ => "Mirror requires an interactive ad shortener; solve it once in a browser and paste \
+              that browser's archive.toonworld4all.me cookies in Settings (General > ToonWorld \
+              Cookie) or set MOVIEBOX_TOONWORLD_COOKIE, or choose another mirror or quality"
+            .to_string(),
+    }
 }
 
 /// Cookies copied from a browser that already passed the archive's 24-hour ad gate. They are
-/// supplied by the user, sent only to the archive's own redirect pages, and never logged.
+/// supplied by the user (the environment variable wins over the value saved in Settings), sent
+/// only to the archive's own redirect pages, and never logged.
 fn archive_cookie() -> Option<String> {
-    std::env::var("MOVIEBOX_TOONWORLD_COOKIE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
+    cookie::from_env().or_else(|| cookie::current().map(|saved| saved.value))
 }
 
 async fn limited_html(
@@ -509,5 +528,37 @@ mod tests {
         assert!(supported_host(
             &Url::parse("https://hubcloud.foo/drive/id").unwrap()
         ));
+    }
+}
+
+#[cfg(test)]
+mod cookie_message_tests {
+    use super::*;
+
+    #[test]
+    fn message_points_at_settings_when_nothing_is_saved() {
+        let message = shortener_message(false, None);
+        assert!(message.contains("Settings (General > ToonWorld Cookie)"));
+        assert!(message.contains("MOVIEBOX_TOONWORLD_COOKIE"));
+    }
+
+    #[test]
+    fn message_reports_a_stale_saved_cookie_by_age() {
+        let message = shortener_message(false, Some(30 * 3600 + 10));
+        assert!(message.contains("30h old"));
+        assert!(message.contains("paste a fresh cookie"));
+    }
+
+    #[test]
+    fn message_for_a_fresh_saved_cookie_asks_to_recopy_it() {
+        let message = shortener_message(false, Some(2 * 3600));
+        assert!(message.contains("2h old"));
+        assert!(message.contains("copy the cookie again"));
+    }
+
+    #[test]
+    fn environment_cookie_suppresses_the_saved_cookie_hint() {
+        let message = shortener_message(true, Some(90 * 3600));
+        assert!(!message.contains("90h"));
     }
 }

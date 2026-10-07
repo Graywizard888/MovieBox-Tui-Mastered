@@ -1,9 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.3] - 2026-10-07
+
+### Added
+- **ToonWorld Cookie in Settings** (General, fourth row): paste the cookies copied from a browser that passed the ToonWorld4All archive's ad gate instead of exporting `MOVIEBOX_TOONWORLD_COOKIE` every time. A leading `Cookie:` is accepted and dropped, an empty value removes it, and `d` on the row clears it. It is stored in its own owner-only file (`toonworld_cookie` in the config folder), not in the settings file, and shown with its age. The environment variable still wins when both are set. When a link still hits the ad gate, the error now says how old the saved cookie is and that the site's pass lasts about 24 hours.
 
 ### Changed
 - The default `MOVIEBOX_SEEK_PROXY_MAX_MB` is now 3000 (was 5000 in 1.0.1), so files up to about 2.9 GB seek through the proxy. Larger files are still played as-is.
+- The Android binary is built with NDK r30 (API level 24) and linked with identical-code folding and 16 KB segment alignment; the release build fails if a segment is aligned lower.
 
 ## [1.0.1] - 2026-10-07
 

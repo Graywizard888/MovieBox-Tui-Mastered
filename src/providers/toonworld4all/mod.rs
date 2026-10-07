@@ -1,6 +1,7 @@
 //! ToonWorld4All WordPress catalog, episode archive and link validation.
 //! Search/details use the public WP API when available; HTML posts are a fallback. Movie
 //! mirrors and archive redirects are not media URLs and are resolved only when selected.
+pub mod cookie;
 mod parser;
 mod resolver;
 

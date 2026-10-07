@@ -83,7 +83,7 @@ impl SettingsCategory {
 
     pub fn row_count(self) -> usize {
         match self {
-            Self::General => 3,
+            Self::General => 4,
             Self::ContentModes => 3,
             Self::Appearance => 1,
             Self::StorageInfo => 5,
@@ -367,7 +367,7 @@ pub struct AppState {
     pub show_settings_popup: bool,
     pub settings_category: SettingsCategory,
     pub settings_selected_row: usize,
-    pub settings_download_dir_input: Option<crate::tui::text::TextInputBuffer>,
+    pub settings_text_input: Option<crate::tui::text::TextInputBuffer>,
     pub show_sources_popup: bool,
     pub sources_list_state: ListState,
 
@@ -547,7 +547,7 @@ impl Default for AppState {
             show_settings_popup: false,
             settings_category: SettingsCategory::General,
             settings_selected_row: 0,
-            settings_download_dir_input: None,
+            settings_text_input: None,
             show_sources_popup: false,
             sources_list_state: ListState::default(),
 
@@ -1125,20 +1125,20 @@ impl AppState {
     pub fn settings_next_category(&mut self) {
         self.settings_category = self.settings_category.next();
         self.settings_selected_row = 0;
-        self.settings_download_dir_input = None;
+        self.settings_text_input = None;
     }
 
     pub fn settings_previous_category(&mut self) {
         self.settings_category = self.settings_category.previous();
         self.settings_selected_row = 0;
-        self.settings_download_dir_input = None;
+        self.settings_text_input = None;
     }
 
     pub fn settings_select_category(&mut self, cat: SettingsCategory) {
         if self.settings_category != cat {
             self.settings_category = cat;
             self.settings_selected_row = 0;
-            self.settings_download_dir_input = None;
+            self.settings_text_input = None;
         }
     }
 

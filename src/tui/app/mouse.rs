@@ -197,7 +197,7 @@ impl App {
                 crate::tui::overlay::settings_modal_layout(area, self.state.settings_category);
             if !popup.contains(ratatui::layout::Position::new(col, row)) {
                 self.state.show_settings_popup = false;
-                self.state.settings_download_dir_input = None;
+                self.state.settings_text_input = None;
                 self.persist_config();
                 return true;
             }
@@ -219,6 +219,10 @@ impl App {
                 col,
                 row,
             ) {
+                if clicked_row != self.state.settings_selected_row {
+                    // An open text field belongs to the row it was opened on.
+                    self.state.settings_text_input = None;
+                }
                 self.state.settings_selected_row = clicked_row;
                 self.action_sender.send(Action::SettingsActivateRow).ok();
                 return true;
