@@ -160,6 +160,69 @@ struct ResumeMetadata {
     segment_progress: Vec<u64>,
 }
 
+/// Container extension implied by a download response: the `Content-Disposition` filename wins,
+/// then the media type. Resolved file-host links (Google Drive CDN, workers) carry no extension
+/// in the URL, so without this every file would be saved as `.mp4` even when it is Matroska.
+pub fn extension_from_headers(
+    content_disposition: Option<&str>,
+    content_type: Option<&str>,
+) -> Option<&'static str> {
+    const KNOWN: [&str; 4] = ["mkv", "mp4", "webm", "ts"];
+    if let Some(disposition) = content_disposition {
+        let lower = disposition.to_ascii_lowercase();
+        if let Some(rest) = lower.split("filename").nth(1) {
+            // `filename="a.mkv"` or RFC 5987 `filename*=UTF-8''a.mkv`.
+            let rest = rest.trim_start_matches(['*', '=', ' ', ':']);
+            let rest = rest.split_once("''").map_or(rest, |(_, name)| name);
+            let name = rest.trim_start_matches(['"', '\'']);
+            if let Some(ext) = name
+                .split(['"', ';'])
+                .next()
+                .and_then(|file| file.rsplit('.').next())
+                && let Some(known) = KNOWN.iter().find(|known| **known == ext.trim())
+            {
+                return Some(known);
+            }
+        }
+    }
+    let mime = content_type?.split(';').next()?.trim().to_ascii_lowercase();
+    match mime.as_str() {
+        "video/x-matroska" | "video/mkv" | "video/matroska" => Some("mkv"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        "video/mp2t" => Some("ts"),
+        _ => None,
+    }
+}
+
+/// Ask the host for the first byte and report the container extension it names, if any.
+/// Best effort: any failure leaves the caller's default in place.
+pub async fn probe_extension(url: &str, headers: &[(String, String)]) -> Option<&'static str> {
+    let client = crate::net::http_client_builder_base()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .ok()?;
+    let mut request = client.get(url).header(RANGE, "bytes=0-0");
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    extension_from_headers(
+        header("content-disposition").as_deref(),
+        header("content-type").as_deref(),
+    )
+}
+
 pub async fn download<F>(
     client: &Client,
     url: &str,
@@ -1194,5 +1257,41 @@ mod tests {
         assert!(progress_count > 0);
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[test]
+    fn extension_follows_disposition_then_media_type() {
+        assert_eq!(
+            extension_from_headers(
+                Some("attachment; filename=\"Inception (2010) 1080p x265-UHDMovies.mkv\""),
+                Some("video/mp4")
+            ),
+            Some("mkv")
+        );
+        assert_eq!(
+            extension_from_headers(Some("attachment; filename*=UTF-8''Movie.2010.MP4"), None),
+            Some("mp4")
+        );
+        assert_eq!(
+            extension_from_headers(None, Some("video/x-matroska")),
+            Some("mkv")
+        );
+        assert_eq!(
+            extension_from_headers(None, Some("video/mkv; charset=x")),
+            Some("mkv")
+        );
+        assert_eq!(
+            extension_from_headers(None, Some("video/webm")),
+            Some("webm")
+        );
+        // A filename without a container extension and an opaque type give no hint.
+        assert_eq!(
+            extension_from_headers(
+                Some("attachment; filename=\"readme.txt\""),
+                Some("application/octet-stream")
+            ),
+            None
+        );
+        assert_eq!(extension_from_headers(None, None), None);
     }
 }

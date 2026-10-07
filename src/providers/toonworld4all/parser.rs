@@ -580,6 +580,74 @@ pub(super) fn post_releases(origins: &Origins, title: &str, content: &str) -> Ve
     releases
 }
 
+/// The archive page is a React app whose full file list ships as `window.__PROPS__`: every
+/// encode (quality, codec, size) with its own mirror redirects. The visible HTML only renders
+/// the selected encode, so reading the data gives all real qualities. Nothing is invented:
+/// an encode without files yields no release.
+fn props_releases(
+    origins: &Origins,
+    page_url: &Url,
+    title: &str,
+    episode: Option<(usize, usize)>,
+    html: &str,
+) -> Vec<Release> {
+    const MARKER: &str = "window.__PROPS__ = ";
+    let Some(start) = html.find(MARKER).map(|index| index + MARKER.len()) else {
+        return Vec::new();
+    };
+    let Some(Ok(props)) = serde_json::Deserializer::from_str(&html[start..])
+        .into_iter::<serde_json::Value>()
+        .next()
+    else {
+        return Vec::new();
+    };
+    let Some(encodes) = props
+        .pointer("/data/data/encodes")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut releases = Vec::new();
+    for encode in encodes {
+        let readable = encode.get("readable");
+        let Some(codec) = readable
+            .and_then(|value| value.get("codec"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| site::quality(text).is_some())
+        else {
+            continue;
+        };
+        let label = match readable
+            .and_then(|value| value.get("size"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(size) => format!("{codec} [{size}]"),
+            None => codec.to_string(),
+        };
+        let files = encode.get("files").and_then(serde_json::Value::as_array);
+        for file in files.into_iter().flatten() {
+            let Some(url) = file
+                .get("link")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|href| site::external_url(page_url, href))
+            else {
+                continue;
+            };
+            if !(is_archive_redirect(origins, &url) || drive::is_media_url(&url)) {
+                continue;
+            }
+            let host = file
+                .get("host")
+                .and_then(serde_json::Value::as_str)
+                .filter(|host| !host.trim().is_empty())
+                .unwrap_or("Archive");
+            let url = canonical_link(origins, &url);
+            add_release(&mut releases, title, Some(&label), episode, host, &url);
+        }
+    }
+    releases
+}
+
 /// Only links actually present in the selected archive quality's Files section become releases.
 /// Quality tabs with no files in the HTML are not invented as downloadable options.
 pub(super) fn archive_releases(
@@ -589,6 +657,10 @@ pub(super) fn archive_releases(
     episode: Option<(usize, usize)>,
     html: &str,
 ) -> Vec<Release> {
+    let encoded = props_releases(origins, page_url, title, episode, html);
+    if !encoded.is_empty() {
+        return encoded;
+    }
     let document = Html::parse_document(html);
     let mut releases = Vec::new();
     let mut quality = None;
@@ -655,8 +727,20 @@ pub(super) fn destination_url(html: &str) -> Option<Url> {
         site::safe_url(token).ok()
     }
 
+    /// The redirect page renders `https://host/video/` and its file id as separate text
+    /// nodes; the id completes the displayed destination.
+    fn file_id(text: &str) -> Option<&str> {
+        (text.len() >= 6
+            && text.len() <= 64
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .then_some(text)
+    }
+
     let document = Html::parse_document(html);
     let mut after_label = false;
+    let mut pending: Option<Url> = None;
     for node in document.root_element().descendants() {
         let Some(text) = node.value().as_text() else {
             continue;
@@ -669,14 +753,23 @@ pub(super) fn destination_url(html: &str) -> Option<Url> {
         if !after_label || trimmed.is_empty() {
             continue;
         }
+        if let Some(base) = &pending {
+            if base.path().ends_with('/')
+                && let Some(id) = file_id(trimmed)
+                && let Ok(joined) = base.join(id)
+            {
+                return Some(joined);
+            }
+            return pending;
+        }
         if lower.contains("24 hours system") || lower.contains("go to destination") {
             break;
         }
         if let Some(url) = visible_url(trimmed) {
-            return Some(url);
+            pending = Some(url);
         }
     }
-    None
+    pending
 }
 
 #[cfg(test)]
@@ -931,5 +1024,51 @@ mod tests {
             destination_url("<p>Destination URL</p><code>http://evil.example/private</code>")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn archive_props_expose_every_encode_with_its_own_mirrors() {
+        let origins = origins();
+        let page = Url::parse("https://archive.toonworld4all.me/movie/toy-story-5-2026").unwrap();
+        let html = r#"<html><body><p>480p x264 494.85 MB</p>
+            <script>window.__PAGE__ = "movie"; window.__PROPS__ = {"data":{"data":{"encodes":[
+              {"resolution":"480p","readable":{"codec":"480p x264","size":"494.85 MB"},
+               "files":[{"host":"HubCloud","link":"/redirect/aaa"},{"host":"GDFlix","link":"/redirect/bbb"}]},
+              {"resolution":"1080p","readable":{"codec":"1080p HEVC 10bit [HQ]","size":"3.69 GB"},
+               "files":[{"host":"HubCloud","link":"/redirect/ccc"}]},
+              {"resolution":"2160p","readable":{"codec":"2160p HEVC 10bit [HQ]","size":"4.13 GB"},
+               "files":[]},
+              {"resolution":"720p","readable":{"codec":"720p x264","size":"978.29 MB"},
+               "files":[{"host":"Evil","link":"https://evil.example/redirect/zzz"}]}
+            ]}},"userSelectedSystem":"24hour"};</script></body></html>"#;
+        let releases = archive_releases(&origins, &page, "Toy Story 5 (2026)", None, html);
+        let found: Vec<(Option<&str>, usize, Option<u64>)> = releases
+            .iter()
+            .map(|r| (r.quality.as_deref(), r.mirrors.len(), r.size_bytes))
+            .collect();
+        // An encode without files or with only off-site links is never invented as a release.
+        assert_eq!(found.len(), 2, "{releases:#?}");
+        assert_eq!(found[0].0, Some("480p"));
+        assert_eq!(found[0].1, 2);
+        assert_eq!(found[1].0, Some("1080p"));
+        assert_eq!(found[1].2, Some((3.69 * 1_073_741_824.0) as u64));
+        assert_eq!(releases[0].mirrors[1].label, "GDFlix");
+        assert!(releases[1].filename.contains("HEVC"));
+    }
+
+    #[test]
+    fn destination_joins_the_displayed_base_and_file_id() {
+        let split = r#"<p>Destination URL</p><div><span>https://hubcloud.ist/video/</span><span> 8bof3bxdbr6lnit </span></div>
+            <p>24 Hours System</p>"#;
+        assert_eq!(
+            destination_url(split).unwrap().as_str(),
+            "https://hubcloud.ist/video/8bof3bxdbr6lnit"
+        );
+        // A complete URL followed by unrelated words is not extended.
+        let whole = "<p>Destination URL</p><span>https://hubcloud.ist/drive/abc</span><span>Recommended</span>";
+        assert_eq!(destination_url(whole).unwrap().path(), "/drive/abc");
+        // A base without a following id stays as displayed.
+        let bare = "<p>Destination URL</p><span>https://hubcloud.ist/video/</span><span>24 Hours System</span>";
+        assert_eq!(destination_url(bare).unwrap().path(), "/video/");
     }
 }

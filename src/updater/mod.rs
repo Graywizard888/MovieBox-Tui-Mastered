@@ -153,32 +153,32 @@ mod tests {
             assets: vec![
                 ReleaseAsset {
                     name: "MovieBox_macOS_Universal.tar.gz".to_string(),
-                    download_url: "https://github.com/mesamirh/MovieBox-Tui/releases/download/v0.1.13/MovieBox_macOS_Universal.tar.gz".to_string(),
+                    download_url: "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.13/MovieBox_macOS_Universal.tar.gz".to_string(),
                     size: Some(15_000_000),
                 },
                 ReleaseAsset {
                     name: "MovieBox_Linux_x64.tar.gz".to_string(),
-                    download_url: "https://github.com/mesamirh/MovieBox-Tui/releases/download/v0.1.13/MovieBox_Linux_x64.tar.gz".to_string(),
+                    download_url: "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.13/MovieBox_Linux_x64.tar.gz".to_string(),
                     size: Some(12_000_000),
                 },
                 ReleaseAsset {
                     name: "MovieBox_Linux_arm64.tar.gz".to_string(),
-                    download_url: "https://github.com/mesamirh/MovieBox-Tui/releases/download/v0.1.13/MovieBox_Linux_arm64.tar.gz".to_string(),
+                    download_url: "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.13/MovieBox_Linux_arm64.tar.gz".to_string(),
                     size: Some(11_500_000),
                 },
                 ReleaseAsset {
                     name: "MovieBox_Windows_x64.zip".to_string(),
-                    download_url: "https://github.com/mesamirh/MovieBox-Tui/releases/download/v0.1.13/MovieBox_Windows_x64.zip".to_string(),
+                    download_url: "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.13/MovieBox_Windows_x64.zip".to_string(),
                     size: Some(13_000_000),
                 },
                 ReleaseAsset {
                     name: "MovieBox_Windows_arm64.zip".to_string(),
-                    download_url: "https://github.com/mesamirh/MovieBox-Tui/releases/download/v0.1.13/MovieBox_Windows_arm64.zip".to_string(),
+                    download_url: "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.13/MovieBox_Windows_arm64.zip".to_string(),
                     size: Some(12_500_000),
                 },
                 ReleaseAsset {
                     name: "SHA256SUMS".to_string(),
-                    download_url: "https://github.com/mesamirh/MovieBox-Tui/releases/download/v0.1.13/SHA256SUMS".to_string(),
+                    download_url: "https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/download/v0.1.13/SHA256SUMS".to_string(),
                     size: Some(512),
                 },
             ],

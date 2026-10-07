@@ -20,7 +20,7 @@ Set-StrictMode -Version Latest
 
 $AppName = "MovieBox-Tui"
 $BinName = "moviebox-tui.exe"
-$Repo = "Graywizard888/MovieBox-Tui"
+$Repo = "Graywizard888/MovieBox-Tui-Mastered"
 $DefaultInstallDir = Join-Path $env:LOCALAPPDATA "Programs\MovieBox-Tui\bin"
 
 if ($Help) {
@@ -28,7 +28,7 @@ if ($Help) {
 MovieBox-TUI Installer (Windows PowerShell)
 
 USAGE:
-    irm https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.ps1 | iex
     .\install.ps1 [OPTIONS]
 
 OPTIONS:

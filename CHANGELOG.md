@@ -1,5 +1,53 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- The seek proxy only refuses the Matroska end-of-file index read while the player is still opening the file (before 64 MiB has been sent); a seek near the end after that is always answered.
+- A `build_only` run of the release workflow can rebuild a version that already has a release.
+
+## [1.0.4] - 2026-10-07
+
+### Fixed
+- **Long black screen on 2-3 GB UHDMovies / Moviesmod files**: the seek proxy advertises byte ranges, so mpv (StreamX) reads the index at the end of an MKV while opening it, and on a host without ranges that meant downloading the whole file before the first frame. The proxy now recognises Matroska/WebM files and refuses such an end-of-file read (416) when it would take longer than 15 s at the host's measured speed; playback starts at once and seeks find their place by scanning forward, which costs the same download time as before. Measured with a 415 MB file behind a 20 MB/s host: the end read answered in 0.5 ms instead of 20.8 s, and a seek to 30 s took 12.8 s instead of 33.3 s. MP4 files are not affected (they may need their end to start at all). `MOVIEBOX_SEEK_PROXY_END_WAIT_SECS` changes the 15 s allowance; a very large value restores the old behaviour.
+
+## [1.0.3] - 2026-10-07
+
+### Added
+- **ToonWorld Cookie in Settings** (General, fourth row): paste the cookies copied from a browser that passed the ToonWorld4All archive's ad gate instead of exporting `MOVIEBOX_TOONWORLD_COOKIE` every time. A leading `Cookie:` is accepted and dropped, an empty value removes it, and `d` on the row clears it. It is stored in its own owner-only file (`toonworld_cookie` in the config folder), not in the settings file, and shown with its age. The environment variable still wins when both are set. When a link still hits the ad gate, the error now says how old the saved cookie is and that the site's pass lasts about 24 hours.
+
+### Changed
+- The default `MOVIEBOX_SEEK_PROXY_MAX_MB` is now 3000 (was 5000 in 1.0.1), so files up to about 2.9 GB seek through the proxy. Larger files are still played as-is.
+- The Android binary is built with NDK r30 (API level 24) and linked with identical-code folding and 16 KB segment alignment; the release build fails if a segment is aligned lower.
+
+## [1.0.1] - 2026-10-07
+
+### Changed
+- **Faster seeks through the seek proxy**: the proxy keeps the origin connection from the previous request and reuses it when the next request is further into the file, so a forward seek skips only the gap instead of re-reading from the start. Rewinding still re-reads from the start. Measured on a live Moviesmod stream: forward seeks to 100/200/300/400 MB took 1.3/5.3/2.5/3.1 s before and 0.9/0.9/0.8/0.8 s after.
+
+- The default `MOVIEBOX_SEEK_PROXY_MAX_MB` is now 5000 (was 2048), so files up to about 4.9 GB seek through the proxy. Larger files are still played as-is.
+
+### Fixed
+- **4KHDHub seeking**: when no mirror answers the byte-range probe (or the probe is slow, as on mobile networks), the chosen mirror is now routed through the seek proxy instead of being played non-seekable. The mirror probe also waits 6 s instead of 3.5 s so slow but seekable mirrors are not discarded.
+- **Resume in Android players (StreamX)**: the intent now carries a stable `media_identifier` and the title, so the player's own saved position matches the same title on the next launch. The local proxy port and tokenised mirror URLs change on every play, which made every launch look like a new video.
+- **Moviesmod "No exact release found"**: a failed download-page fetch is retried (up to three tries) and, if every page still fails, the provider reports a temporary failure instead of an empty list.
+
+## [1.0.0] - 2026-10-07
+
+### Added
+- **Seeking on UHDMovies, Moviesmod and ToonWorld4All**: playback now prefers a mirror that answers byte-range requests (Driveseed/Driveleech *Resume Cloud* workers), as 4KHDHub already did. Files that only have the non-seekable *Instant* mirror are routed through the loopback proxy (`src/proxy.rs`), which answers `Range` requests itself by discarding the bytes before the target. Nothing is written to disk. Files above `MOVIEBOX_SEEK_PROXY_MAX_MB` (default 2048) are played as-is.
+- **Season quality prompt**: pressing download on a season for UHDMovies, Moviesmod or ToonWorld4All asks which quality to use and applies it to every episode in the queue.
+- **ToonWorld4All archive qualities**: every advertised encode (codec and size) is listed from the archive page, and `MOVIEBOX_TOONWORLD_COOKIE` lets a browser session that passed the site's ad gate be used for link resolution.
+
+### Changed
+- In-app update checks, release downloads, installers (`install.sh`, `install.ps1`) and the Settings repository link now use `Graywizard888/MovieBox-Tui-Mastered`.
+- Downloads from resolved WordPress-provider hosts are named by their real container (`.mkv`) from the host's response headers instead of always `.mp4`.
+
+### Fixed
+- UHDMovies and Moviesmod link resolution through the current LinkPilot link gate (generic form and cookie walker), and removal of decoy tag links that were parsed as releases.
+- Wrong `4K` tags on 1080p releases (UHDMovies, 4KHDHub, search-card badges): resolution is now detected by whole token instead of substring.
+- A failed link resolution in the middle of a season download now halts the queue cleanly instead of silently ignoring the next download.
+
 ## [0.1.25] - 2026-09-27
 
 ### Fixed

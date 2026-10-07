@@ -1768,6 +1768,15 @@ impl App {
 
                     let is_season_queue = self.state.download_queue_total > 0;
                     if is_season_queue {
+                        // Apply the quality chosen for the whole season to this episode.
+                        if let Some(index) = self
+                            .state
+                            .season_quality_choice
+                            .as_ref()
+                            .and_then(|choice| choice.pick(&self.state.selected_resources))
+                        {
+                            self.state.resource_list_state.select(Some(index));
+                        }
                         let subject_id = self.state.active_subject_id.clone().unwrap_or_default();
                         if let Some(rid) = self.get_selected_resource_id() {
                             let service = self.service.clone();
@@ -2247,5 +2256,69 @@ mod tests {
         .await;
 
         assert_eq!(app.state.resource_list_state.selected(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn season_queue_applies_the_chosen_quality_to_each_episodes_streams() {
+        let mut app = App::new();
+        let subject_id = "/show-season-1/".to_string();
+        app.state.active_subject_id = Some(subject_id.clone());
+        app.state.active_provider = ProviderKind::UhdMovies;
+        app.state.selected_season = 1;
+        app.state.selected_episode = 2;
+        app.state.is_waiting_for_download_stream = true;
+        app.state.download_queue_total = 3;
+        app.state.season_quality_choice = Some(crate::tui::state::SeasonQuality {
+            height: 1080,
+            codec: Some("hevc".into()),
+            variant: Some("show 1080p hevc".into()),
+        });
+        app.state.stream_pool.insert(
+            subject_id.clone(),
+            crate::tui::state::SubjectStreamPool::default(),
+        );
+        let release = |quality: &str, codec: &str, url: &str| Release {
+            provider: ProviderKind::UhdMovies,
+            filename: format!("Show S01E02 {quality} {codec}"),
+            quality: Some(quality.into()),
+            codec: Some(codec.into()),
+            language: None,
+            size_bytes: Some(1),
+            season: Some(1),
+            episode: Some(2),
+            mirrors: vec![SourceMirror {
+                label: "G-Drive".into(),
+                resolver_url: url.into(),
+                headers: vec![],
+                direct_file: false,
+            }],
+            resource_id: None,
+        };
+        let raw_list = vec![
+            release("2160p", "HEVC", "https://gate.example/?sid=a"),
+            release("1080p", "H.264", "https://gate.example/?sid=b"),
+            release("1080p", "HEVC", "https://gate.example/?sid=c"),
+            release("720p", "H.264", "https://gate.example/?sid=d"),
+        ];
+
+        let context = app.request_context();
+        app.handle_requests(Action::EpisodeStreamsReady(
+            context,
+            app.state.active_resource_request,
+            subject_id,
+            1,
+            2,
+            raw_list,
+        ))
+        .await;
+
+        // Streams are listed highest resolution first; the season's choice wins over index 0.
+        let selected = app.get_selected_release().expect("a stream is selected");
+        assert_eq!(selected.quality.as_deref(), Some("1080p"));
+        assert_eq!(selected.codec.as_deref(), Some("HEVC"));
+        assert!(matches!(
+            app.action_receiver.try_recv(),
+            Ok(Action::DownloadStream(None))
+        ));
     }
 }

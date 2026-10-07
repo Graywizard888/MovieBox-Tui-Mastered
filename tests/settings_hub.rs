@@ -202,7 +202,7 @@ async fn test_settings_mouse_tab_and_row_clicks() {
     assert_eq!(cat_maint, Some(SettingsCategory::StorageInfo));
 
     let rows = settings_row_rects(popup, SettingsCategory::General);
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 4);
     assert_eq!(
         settings_row_at(popup, SettingsCategory::General, rows[0].x + 2, rows[0].y),
         Some(0)
@@ -223,6 +223,10 @@ async fn test_settings_mouse_tab_and_row_clicks() {
     assert_eq!(
         settings_row_at(popup, SettingsCategory::General, rows[2].x + 2, rows[2].y),
         Some(2)
+    );
+    assert_eq!(
+        settings_row_at(popup, SettingsCategory::General, rows[3].x + 2, rows[3].y),
+        Some(3)
     );
 }
 
@@ -327,4 +331,72 @@ async fn test_settings_hub_clear_watch_history_activation() {
         .expect("notification emitted");
     assert_eq!(notification.title, "History");
     assert_eq!(notification.message, "Watch history cleared");
+}
+
+#[tokio::test]
+async fn test_settings_toonworld_cookie_is_saved_shown_cancelled_and_cleared() {
+    use moviebox_tui::providers::toonworld4all::cookie;
+
+    let mut app = App::new();
+    app.handle_action(Action::ToggleSettingsPopup).await;
+    for _ in 0..3 {
+        app.handle_action(Action::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::empty(),
+        )))
+        .await;
+    }
+    assert_eq!(app.state().settings_selected_row, 3);
+
+    // Esc abandons an edit without saving anything.
+    app.handle_action(Action::SettingsActivateRow).await;
+    assert!(app.state().settings_text_input.is_some());
+    for c in "user=ignored".chars() {
+        app.handle_action(Action::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::empty(),
+        )))
+        .await;
+    }
+    app.handle_action(Action::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::empty(),
+    )))
+    .await;
+    assert!(app.state().settings_text_input.is_none());
+    assert!(cookie::current().is_none());
+
+    // A pasted "Cookie:" header line is saved without its name, and takes effect at once.
+    app.handle_action(Action::SettingsActivateRow).await;
+    for c in "Cookie: user=abc; x=1".chars() {
+        app.handle_action(Action::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::empty(),
+        )))
+        .await;
+    }
+    app.handle_action(Action::SettingsActivateRow).await;
+    assert!(app.state().settings_text_input.is_none());
+    let saved = cookie::current().expect("cookie saved");
+    assert_eq!(saved.value, "user=abc; x=1");
+    assert!(!saved.is_stale(cookie::now_secs()));
+
+    // Reopening shows the saved value for editing; an empty field removes it.
+    app.handle_action(Action::SettingsActivateRow).await;
+    assert_eq!(
+        app.state().settings_text_input.as_ref().map(|i| i.as_str()),
+        Some("user=abc; x=1")
+    );
+    app.state_mut().settings_text_input = Some(moviebox_tui::tui::text::TextInputBuffer::new());
+    app.handle_action(Action::SettingsActivateRow).await;
+    assert!(cookie::current().is_none());
+
+    // `d` on the row clears a saved cookie too.
+    cookie::save(Some("user=again")).unwrap();
+    app.handle_action(Action::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::empty(),
+    )))
+    .await;
+    assert!(cookie::current().is_none());
 }

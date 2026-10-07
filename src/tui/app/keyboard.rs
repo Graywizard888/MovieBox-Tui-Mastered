@@ -455,10 +455,10 @@ impl App {
             return None;
         }
         if self.state.show_settings_popup {
-            if let Some(input) = &mut self.state.settings_download_dir_input {
+            if let Some(input) = &mut self.state.settings_text_input {
                 match key.code {
                     KeyCode::Esc => {
-                        self.state.settings_download_dir_input = None;
+                        self.state.settings_text_input = None;
                     }
                     KeyCode::Enter => {
                         self.action_sender.send(Action::SettingsActivateRow).ok();
@@ -473,7 +473,7 @@ impl App {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.state.show_settings_popup = false;
-                    self.state.settings_download_dir_input = None;
+                    self.state.settings_text_input = None;
                     self.persist_config();
                 }
                 KeyCode::Tab => {
@@ -509,6 +509,13 @@ impl App {
                     self.action_sender
                         .send(Action::SettingsResetDownloadDir)
                         .ok();
+                }
+                KeyCode::Char('d') | KeyCode::Char('D')
+                    if self.state.settings_category
+                        == crate::tui::state::SettingsCategory::General
+                        && self.state.settings_selected_row == 3 =>
+                {
+                    self.clear_toonworld_cookie();
                 }
                 _ => {}
             }

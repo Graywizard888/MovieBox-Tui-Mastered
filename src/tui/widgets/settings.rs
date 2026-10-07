@@ -236,7 +236,7 @@ fn has_active_settings_popup(state: &AppState) -> bool {
         || state.show_sources_popup
         || state.player_picker_popup
         || state.show_browse_popup
-        || state.settings_download_dir_input.is_some()
+        || state.settings_text_input.is_some()
 }
 
 struct SettingRow<'a> {
@@ -339,7 +339,7 @@ fn render_row(
 }
 
 fn render_general_settings(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let row_rects = settings_row_rects_in_area(area, 3);
+    let row_rects = settings_row_rects_in_area(area, 4);
     let has_active_popup = has_active_settings_popup(state);
 
     if let Some(&row_area) = row_rects.first() {
@@ -402,56 +402,57 @@ fn render_general_settings(frame: &mut Frame, area: Rect, state: &AppState, them
 
     if let Some(&row_area) = row_rects.get(2) {
         let is_selected = state.settings_selected_row == 2;
-        let value_spans = if let Some(input) = &state.settings_download_dir_input {
-            let cursor_char = if state.basic_terminal { "_" } else { "▌" };
-            let input_str = input.as_str();
-            let cursor_offset = input.cursor_byte_offset();
-            let (before, after) = input_str.split_at(cursor_offset);
-            let input_budget = (row_area.width as usize).saturating_sub(21).clamp(10, 60);
-            let truncated_before =
-                crate::tui::text::truncate_width(before, input_budget.saturating_sub(4));
-            if state.basic_terminal {
-                vec![
-                    Span::styled(truncated_before, theme.text),
-                    Span::styled(cursor_char, theme.text.add_modifier(Modifier::BOLD)),
-                    Span::styled(after, theme.text),
-                ]
-            } else {
-                let input_bg = theme.surface0_color();
-                let input_style = Style::default()
-                    .fg(theme
-                        .text
-                        .fg
-                        .unwrap_or(theme.subtext1.fg.unwrap_or(theme.base)))
-                    .bg(input_bg);
-                let cursor_style = theme.accent.add_modifier(Modifier::BOLD).bg(input_bg);
-                vec![
-                    Span::styled(truncated_before, input_style),
-                    Span::styled(cursor_char, cursor_style),
-                    Span::styled(after, input_style),
-                ]
-            }
-        } else {
-            let path_str = state
-                .download_dir
-                .as_ref()
-                .map(crate::logging::sanitize_path)
-                .unwrap_or_else(|| {
-                    crate::logging::sanitize_path(crate::service::resolve_download_dir(None))
-                });
-            let path_budget = (row_area.width as usize).saturating_sub(21).clamp(10, 60);
-            let truncated = crate::tui::text::truncate_middle_width(&path_str, path_budget);
-            vec![Span::styled(
-                truncated,
-                if has_active_popup {
-                    theme.muted
-                } else if state.basic_terminal {
-                    theme.text_dim
+        let value_spans =
+            if let Some(input) = state.settings_text_input.as_ref().filter(|_| is_selected) {
+                let cursor_char = if state.basic_terminal { "_" } else { "▌" };
+                let input_str = input.as_str();
+                let cursor_offset = input.cursor_byte_offset();
+                let (before, after) = input_str.split_at(cursor_offset);
+                let input_budget = (row_area.width as usize).saturating_sub(21).clamp(10, 60);
+                let truncated_before =
+                    crate::tui::text::truncate_width(before, input_budget.saturating_sub(4));
+                if state.basic_terminal {
+                    vec![
+                        Span::styled(truncated_before, theme.text),
+                        Span::styled(cursor_char, theme.text.add_modifier(Modifier::BOLD)),
+                        Span::styled(after, theme.text),
+                    ]
                 } else {
-                    theme.subtext1
-                },
-            )]
-        };
+                    let input_bg = theme.surface0_color();
+                    let input_style = Style::default()
+                        .fg(theme
+                            .text
+                            .fg
+                            .unwrap_or(theme.subtext1.fg.unwrap_or(theme.base)))
+                        .bg(input_bg);
+                    let cursor_style = theme.accent.add_modifier(Modifier::BOLD).bg(input_bg);
+                    vec![
+                        Span::styled(truncated_before, input_style),
+                        Span::styled(cursor_char, cursor_style),
+                        Span::styled(after, input_style),
+                    ]
+                }
+            } else {
+                let path_str = state
+                    .download_dir
+                    .as_ref()
+                    .map(crate::logging::sanitize_path)
+                    .unwrap_or_else(|| {
+                        crate::logging::sanitize_path(crate::service::resolve_download_dir(None))
+                    });
+                let path_budget = (row_area.width as usize).saturating_sub(21).clamp(10, 60);
+                let truncated = crate::tui::text::truncate_middle_width(&path_str, path_budget);
+                vec![Span::styled(
+                    truncated,
+                    if has_active_popup {
+                        theme.muted
+                    } else if state.basic_terminal {
+                        theme.text_dim
+                    } else {
+                        theme.subtext1
+                    },
+                )]
+            };
         render_row(
             frame,
             row_area,
@@ -465,6 +466,108 @@ fn render_general_settings(frame: &mut Frame, area: Rect, state: &AppState, them
             state.basic_terminal,
         );
     }
+
+    if let Some(&row_area) = row_rects.get(3) {
+        let is_selected = state.settings_selected_row == 3;
+        let budget = (row_area.width as usize).saturating_sub(24).clamp(10, 60);
+        let value_spans =
+            if let Some(input) = state.settings_text_input.as_ref().filter(|_| is_selected) {
+                let cursor_char = if state.basic_terminal { "_" } else { "▌" };
+                let (before, after) = input.as_str().split_at(input.cursor_byte_offset());
+                // A pasted cookie is long: keep the end, where the cursor is, in view.
+                let visible_before = crate::tui::text::tail_width(before, budget.saturating_sub(2));
+                let after = crate::tui::text::truncate_width(after, 6);
+                if state.basic_terminal {
+                    vec![
+                        Span::styled(visible_before, theme.text),
+                        Span::styled(cursor_char, theme.text.add_modifier(Modifier::BOLD)),
+                        Span::styled(after, theme.text),
+                    ]
+                } else {
+                    let input_bg = theme.surface0_color();
+                    let input_style = Style::default()
+                        .fg(theme
+                            .text
+                            .fg
+                            .unwrap_or(theme.subtext1.fg.unwrap_or(theme.base)))
+                        .bg(input_bg);
+                    let cursor_style = theme.accent.add_modifier(Modifier::BOLD).bg(input_bg);
+                    vec![
+                        Span::styled(visible_before, input_style),
+                        Span::styled(cursor_char, cursor_style),
+                        Span::styled(after, input_style),
+                    ]
+                }
+            } else {
+                let base_style = if has_active_popup {
+                    theme.muted
+                } else if state.basic_terminal {
+                    theme.text_dim
+                } else {
+                    theme.subtext1
+                };
+                toonworld_cookie_summary(budget, base_style, has_active_popup, theme)
+            };
+        render_row(
+            frame,
+            row_area,
+            SettingRow {
+                is_selected,
+                has_active_popup,
+                label: "ToonWorld Cookie",
+                value_spans,
+            },
+            theme,
+            state.basic_terminal,
+        );
+    }
+}
+
+fn format_age(secs: u64) -> String {
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+/// The idle text of the ToonWorld cookie row: what is in effect and how old it is.
+fn toonworld_cookie_summary<'a>(
+    budget: usize,
+    base_style: Style,
+    has_active_popup: bool,
+    theme: &Theme,
+) -> Vec<Span<'a>> {
+    use crate::providers::toonworld4all::cookie;
+    if cookie::from_env().is_some() {
+        return vec![Span::styled("from MOVIEBOX_TOONWORLD_COOKIE", base_style)];
+    }
+    let Some(saved) = cookie::current() else {
+        return vec![Span::styled("not set (Enter to paste)", base_style)];
+    };
+    let age_secs = saved.age_secs(cookie::now_secs());
+    let age_text = format!("  {}", format_age(age_secs));
+    let value_budget = budget
+        .saturating_sub(crate::tui::text::width(&age_text))
+        .max(8);
+    let age_style = if has_active_popup || !saved.is_stale(cookie::now_secs()) {
+        base_style
+    } else {
+        theme.error
+    };
+    let age_text = if saved.is_stale(cookie::now_secs()) {
+        format!("{age_text}, likely expired")
+    } else {
+        age_text
+    };
+    vec![
+        Span::styled(
+            crate::tui::text::truncate_middle_width(&saved.value, value_budget),
+            base_style,
+        ),
+        Span::styled(age_text, age_style),
+    ]
 }
 
 fn render_content_modes_settings(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -956,7 +1059,7 @@ mod tests {
         assert_eq!(cat_modes, Some(SettingsCategory::ContentModes));
 
         let row_rects = settings_row_rects(popup, SettingsCategory::General);
-        assert_eq!(row_rects.len(), 3);
+        assert_eq!(row_rects.len(), 4);
 
         let clicked_row = settings_row_at(popup, SettingsCategory::General, 40, row_rects[0].y);
         assert_eq!(clicked_row, Some(0));
@@ -1049,6 +1152,24 @@ mod tests {
         let popup = Rect::new(4, 4, 76, 17);
         let rows = settings_row_rects(popup, SettingsCategory::Appearance);
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn tail_width_keeps_the_end_of_a_long_pasted_cookie() {
+        let cookie = "user=abcdefghijklmnopqrstuvwxyz; session=0123456789";
+        let shown = crate::tui::text::tail_width(cookie, 20);
+        assert!(crate::tui::text::width(&shown) <= 20);
+        assert!(shown.starts_with('…'));
+        assert!(shown.ends_with("session=0123456789"));
+        assert_eq!(crate::tui::text::tail_width("short", 20), "short");
+    }
+
+    #[test]
+    fn format_age_uses_the_largest_whole_unit() {
+        assert_eq!(format_age(5), "just now");
+        assert_eq!(format_age(5 * 60), "5m ago");
+        assert_eq!(format_age(3 * 3600 + 59), "3h ago");
+        assert_eq!(format_age(2 * 86_400), "2d ago");
     }
 
     #[test]

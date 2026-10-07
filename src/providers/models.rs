@@ -337,6 +337,11 @@ pub struct PlaybackSource {
     pub source_label: String,
     #[serde(default)]
     pub max_height: Option<u64>,
+    /// Whether the resolved host honours byte-range requests. `Some(false)` means
+    /// players cannot seek and playback should go through the seek-emulating proxy.
+    /// `None` means unknown, so the stream is played as-is.
+    #[serde(default)]
+    pub seekable: Option<bool>,
 }
 
 impl PlaybackSource {
@@ -348,6 +353,7 @@ impl PlaybackSource {
             subtitle,
             source_label: provider.label().to_string(),
             max_height: None,
+            seekable: None,
         }
     }
 }
@@ -458,6 +464,53 @@ pub fn extract_4digit_year(raw: &str) -> String {
         .and_then(|window| std::str::from_utf8(window).ok())
         .map(str::to_string)
         .unwrap_or_default()
+}
+
+/// Pixel height named by a release label or filename. Whole tokens only: substring matching
+/// turns site tags (`4KHDHub`), encoder tags (`DS4K`) and flags (`HDR`, `SDR`) into bogus
+/// 4K/720p/480p tags. The first explicit height wins (`1080p ... 4K UHD` is 1080p); a bare
+/// `4K` token is only a fallback and the generic word `UHD` is never enough (UHDMovies and
+/// 4KHDHub brand 1080p encodes "1080p UHD"). Bare numbers such as `1080` count here because
+/// release filenames use them (`Video.1080.WEB-DL`).
+pub fn label_resolution(label: &str) -> Option<u64> {
+    scan_resolution(label, true)
+}
+
+/// Like [`label_resolution`] for free-form titles, where a bare number is just a word
+/// ("360", "The 480 Club", "1408"): only explicit `p`/`i` heights or a `4K` token count.
+pub fn title_resolution(title: &str) -> Option<u64> {
+    scan_resolution(title, false)
+}
+
+fn scan_resolution(text: &str, allow_bare: bool) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let mut has_4k_token = false;
+    for token in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let height = match token {
+            "2160p" | "2160i" => 2160,
+            "1440p" => 1440,
+            "1080p" | "1080i" => 1080,
+            "720p" => 720,
+            "576p" => 576,
+            "540p" => 540,
+            "480p" => 480,
+            "360p" => 360,
+            "2160" if allow_bare => 2160,
+            "1440" if allow_bare => 1440,
+            "1080" if allow_bare => 1080,
+            "720" if allow_bare => 720,
+            "576" if allow_bare => 576,
+            "540" if allow_bare => 540,
+            "480" if allow_bare => 480,
+            "4k" => {
+                has_4k_token = true;
+                continue;
+            }
+            _ => continue,
+        };
+        return Some(height);
+    }
+    has_4k_token.then_some(2160)
 }
 
 pub fn parse_size_bytes(text: &str) -> Option<u64> {

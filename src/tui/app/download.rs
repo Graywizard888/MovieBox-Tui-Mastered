@@ -2,6 +2,127 @@ use super::App;
 use crate::providers::models::ProviderKind;
 use crate::tui::{action::Action, overlay::NotificationKind, state::Screen};
 
+/// File extension for a download: the URL's own container extension, else the one the host
+/// reported (see `crate::download::probe_extension`), else `mp4`.
+fn download_extension(link: &str, hint: Option<&str>) -> String {
+    link.split('?')
+        .next()
+        .and_then(|path| path.rsplit('.').next())
+        .map(str::to_ascii_lowercase)
+        .filter(|ext| matches!(ext.as_str(), "mp4" | "mkv" | "webm" | "ts"))
+        .or_else(|| hint.map(str::to_string))
+        .unwrap_or_else(|| "mp4".to_string())
+}
+
+impl App {
+    /// Queue every episode of the selected season and start the first one.
+    fn begin_season_queue(&mut self) {
+        let season_num = self.state.selected_season;
+        let season_array_idx = self
+            .state
+            .available_seasons
+            .iter()
+            .position(|s| s.number == season_num);
+        if let Some(idx) = season_array_idx
+            && idx < self.state.available_episode_numbers.len()
+        {
+            let ep_numbers = self.state.available_episode_numbers[idx].clone();
+            self.state.download_queue.clear();
+            for ep in ep_numbers {
+                self.state.download_queue.push_back((season_num, ep));
+            }
+            self.state.download_queue_total = self.state.download_queue.len();
+            self.action_sender.send(Action::ProcessDownloadQueue).ok();
+        }
+    }
+
+    /// Season downloads from the WordPress providers list many qualities per episode (up to
+    /// 20 GB each), so ask which one to use for the whole season instead of silently taking
+    /// the largest. Returns `false` when no question applies and the queue can start.
+    fn open_season_quality_prompt(&mut self) -> bool {
+        if !matches!(
+            self.current_subject_provider(),
+            ProviderKind::UhdMovies | ProviderKind::Moviesmod | ProviderKind::ToonWorld4All
+        ) || self.state.is_fetching_streams
+        {
+            return false;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for release in &self.state.selected_resources {
+            if release.resolution_u64() == 0 {
+                continue;
+            }
+            let key = crate::tui::state::SeasonQuality::key_for(release);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            // "<resolution> · <what distinguishes this encode> · <size>"
+            let (_, variant) = crate::tui::state::variant_of(release);
+            let quality = release.quality.clone().unwrap_or_default();
+            let detail = variant
+                .to_ascii_lowercase()
+                .find(&quality.to_ascii_lowercase())
+                .map(|start| variant[start + quality.len()..].trim().to_string())
+                .filter(|detail| !detail.is_empty())
+                .or_else(|| release.codec.clone());
+            let mut parts = vec![quality];
+            if let Some(detail) = detail {
+                parts.push(detail);
+            }
+            if let Some(size) = release.size_bytes {
+                parts.push(crate::tui::text::format_file_size(size as f64));
+            }
+            entries.push((parts.join(" · "), key));
+        }
+        if entries.is_empty() {
+            return false;
+        }
+        let highlighted = self
+            .get_selected_release()
+            .map(|release| crate::tui::state::SeasonQuality::key_for(&release));
+        let selected = highlighted
+            .and_then(|key| entries.iter().position(|(_, entry)| *entry == key))
+            .unwrap_or(0);
+        self.state.subtitle_popup = false;
+        self.state.is_download_subtitle_popup = true;
+        self.state.season_quality_pending = true;
+        self.state.subtitle_list = entries;
+        self.state.subtitle_list_state.select(Some(selected));
+        true
+    }
+
+    fn close_season_quality_prompt(&mut self) -> Option<String> {
+        let idx = self.state.subtitle_list_state.selected().unwrap_or(0);
+        let entry = self.state.subtitle_list.get(idx).cloned();
+        self.state.season_quality_pending = false;
+        self.state.is_download_subtitle_popup = false;
+        self.state.subtitle_list.clear();
+        self.state.subtitle_list_state.select(None);
+        entry.map(|(label, key)| {
+            self.state.season_quality_choice = crate::tui::state::SeasonQuality::from_key(&key);
+            label
+        })
+    }
+
+    pub(super) fn confirm_season_quality(&mut self) {
+        if let Some(label) = self.close_season_quality_prompt() {
+            self.state.notify(
+                NotificationKind::Info,
+                "Season download",
+                format!("Using {label} for every episode."),
+            );
+        }
+        self.begin_season_queue();
+    }
+
+    pub(super) fn cancel_season_quality_prompt(&mut self) {
+        self.close_season_quality_prompt();
+        self.state.season_quality_choice = None;
+        self.state.set_status_default("Season download cancelled.");
+    }
+}
+
 impl App {
     pub(super) fn start_resilient_download(
         &mut self,
@@ -48,16 +169,7 @@ impl App {
         let episode = self.state.selected_episode;
         let safe_title = crate::download::safe_file_stem(clean_title);
 
-        let extension = link
-            .split('?')
-            .next()
-            .and_then(|path| path.rsplit('.').next())
-            .filter(|ext| {
-                let lower = ext.to_ascii_lowercase();
-                matches!(lower.as_str(), "mp4" | "mkv" | "webm" | "ts")
-            })
-            .unwrap_or("mp4")
-            .to_ascii_lowercase();
+        let extension = download_extension(&link, self.state.download_extension_hint.take());
 
         let base_dir = crate::service::resolve_download_dir(self.state.download_dir.as_deref());
         let (target_dir, base_name) = crate::download::resolve_media_target(
@@ -566,6 +678,8 @@ impl App {
                         ) {
                             let service = self.service.clone();
                             let sender = self.action_sender.clone();
+                            // A failure mid-season must halt the queue like any failed download.
+                            let in_season_queue = self.state.download_queue_total > 0;
                             tokio::spawn(async move {
                                 let result = tokio::time::timeout(
                                     std::time::Duration::from_secs(60),
@@ -581,6 +695,16 @@ impl App {
                                             .quality
                                             .as_ref()
                                             .map(|_| release.resolution_u64());
+                                        if let Some(extension) = crate::download::probe_extension(
+                                            &source.url,
+                                            &source.headers,
+                                        )
+                                        .await
+                                        {
+                                            sender
+                                                .send(Action::SetDownloadExtension(extension))
+                                                .ok();
+                                        }
                                         sender
                                             .send(Action::StartDownload(
                                                 subtitle_url,
@@ -595,20 +719,31 @@ impl App {
                                             "{} download resolve failed: {error}",
                                             release.provider.label()
                                         );
-                                        sender
-                                            .send(Action::SetStatus(format!(
-                                                "Error: {}",
-                                                error.user_message(release.provider),
-                                            )))
-                                            .ok();
+                                        let message = error.user_message(release.provider);
+                                        if in_season_queue {
+                                            sender.send(Action::DownloadFailed(message)).ok();
+                                        } else {
+                                            sender
+                                                .send(Action::SetStatus(format!(
+                                                    "Error: {message}"
+                                                )))
+                                                .ok();
+                                        }
                                     }
                                     Err(_) => {
-                                        sender
-                                            .send(Action::SetStatus(format!(
-                                                "Error: {}: Link resolution timed out.",
-                                                release.provider.label(),
-                                            )))
-                                            .ok();
+                                        let message = format!(
+                                            "{}: Link resolution timed out.",
+                                            release.provider.label()
+                                        );
+                                        if in_season_queue {
+                                            sender.send(Action::DownloadFailed(message)).ok();
+                                        } else {
+                                            sender
+                                                .send(Action::SetStatus(format!(
+                                                    "Error: {message}"
+                                                )))
+                                                .ok();
+                                        }
                                     }
                                 }
                             });
@@ -714,6 +849,10 @@ impl App {
                 }
                 return None;
             }
+            Action::SetDownloadExtension(extension) => {
+                self.state.download_extension_hint = Some(extension);
+                return None;
+            }
             Action::StartDownload(subtitle_url, link, headers, max_height) => {
                 self.state.is_resolving_playback = false;
                 self.start_resilient_download(subtitle_url, link, headers, max_height);
@@ -755,25 +894,9 @@ impl App {
             }
             Action::DownloadSeason => {
                 self.state.season_subtitle_preference = None;
-                let season_num = self.state.selected_season;
-
-                let season_array_idx = self
-                    .state
-                    .available_seasons
-                    .iter()
-                    .position(|s| s.number == season_num);
-
-                if let Some(idx) = season_array_idx {
-                    if idx < self.state.available_episode_numbers.len() {
-                        let ep_numbers = self.state.available_episode_numbers[idx].clone();
-                        self.state.download_queue.clear();
-
-                        for ep in ep_numbers {
-                            self.state.download_queue.push_back((season_num, ep));
-                        }
-                        self.state.download_queue_total = self.state.download_queue.len();
-                        self.action_sender.send(Action::ProcessDownloadQueue).ok();
-                    }
+                self.state.season_quality_choice = None;
+                if !self.open_season_quality_prompt() {
+                    self.begin_season_queue();
                 }
             }
 
@@ -873,6 +996,8 @@ impl App {
                 });
             }
             Action::DownloadFailed(error) => {
+                // Also reached when a link fails to resolve, before any download started.
+                self.state.is_resolving_playback = false;
                 self.state.download_progress = None;
                 self.state.download_status = None;
                 self.state.download_title = None;
@@ -1509,5 +1634,372 @@ mod tests {
             .join(format!("{base_name}.en.srt"));
         assert_eq!(series_file, expected_series_file);
         assert_eq!(series_sub, expected_series_sub);
+    }
+
+    #[tokio::test]
+    async fn wordpress_season_download_waits_for_streams_instead_of_failing() {
+        // The season queue asks for a download right after requesting the episode's streams.
+        // That request must park (not fail) until the streams arrive.
+        for provider in [
+            ProviderKind::UhdMovies,
+            ProviderKind::Moviesmod,
+            ProviderKind::ToonWorld4All,
+        ] {
+            let mut app = App::new();
+            app.state.active_provider = provider;
+            app.state.active_screen = Screen::Details;
+            app.state.is_fetching_streams = true;
+            app.state.selected_resources.clear();
+
+            app.handle_download(Action::DownloadStream(None)).await;
+            let dispatched = app.action_receiver.try_recv().expect("action dispatched");
+            let Action::StartDownload(sub, link, headers, max_height) = dispatched else {
+                panic!("expected StartDownload for {provider:?}");
+            };
+            assert!(link.is_none(), "no stream is selected yet");
+            app.handle_download(Action::StartDownload(sub, link, headers, max_height))
+                .await;
+
+            assert!(
+                app.state.is_waiting_for_download_stream,
+                "{provider:?} download should wait for streams"
+            );
+            assert!(app.state.download_progress.is_none());
+            assert!(
+                app.state
+                    .notifications
+                    .iter()
+                    .all(|note| note.kind != NotificationKind::Error),
+                "{provider:?} must not report an error while streams load"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wordpress_download_without_streams_reports_a_clear_warning() {
+        let mut app = App::new();
+        app.state.active_provider = ProviderKind::UhdMovies;
+        app.state.active_screen = Screen::Details;
+        app.state.is_fetching_streams = false;
+
+        app.handle_download(Action::StartDownload(None, None, Vec::new(), None))
+            .await;
+
+        assert!(!app.state.is_waiting_for_download_stream);
+        let note = app.state.notifications.back().expect("notification posted");
+        assert_eq!(note.kind, NotificationKind::Warning);
+        assert_eq!(note.title, "Download unavailable");
+    }
+
+    #[test]
+    fn download_extension_prefers_the_url_then_the_host_hint() {
+        use super::download_extension;
+        assert_eq!(
+            download_extension("https://cdn.example/a/Movie.MKV?sig=1", Some("mp4")),
+            "mkv"
+        );
+        // Resolved drive links carry no extension, so the host's answer decides.
+        assert_eq!(
+            download_extension(
+                "https://video-downloads.googleusercontent.com/ADGPM2x",
+                Some("mkv")
+            ),
+            "mkv"
+        );
+        assert_eq!(
+            download_extension("https://worker.example/dl?id=abc.bin", Some("webm")),
+            "webm"
+        );
+        assert_eq!(
+            download_extension("https://cdn.example/stream", None),
+            "mp4"
+        );
+        assert_eq!(download_extension("https://cdn.example/x.txt", None), "mp4");
+    }
+
+    fn release(provider: ProviderKind, quality: &str, codec: Option<&str>, size: u64) -> Release {
+        Release {
+            provider,
+            filename: format!("Show S01E01 {quality} {}", codec.unwrap_or("")),
+            quality: Some(quality.to_string()),
+            codec: codec.map(str::to_string),
+            language: None,
+            size_bytes: Some(size),
+            season: Some(1),
+            episode: Some(1),
+            mirrors: vec![SourceMirror {
+                label: "G-Drive".into(),
+                resolver_url: "https://gate.example/?sid=x".into(),
+                headers: vec![],
+                direct_file: false,
+            }],
+            resource_id: None,
+        }
+    }
+
+    fn season_app(provider: ProviderKind) -> App {
+        use crate::providers::models::Season;
+        let mut app = App::new();
+        app.state.active_provider = provider;
+        app.state.active_screen = Screen::Details;
+        app.state.selected_season = 1;
+        app.state.available_seasons = vec![Season {
+            number: 1,
+            episodes: vec![],
+        }];
+        app.state.available_episode_numbers = vec![vec![1, 2, 3]];
+        app.state.selected_resources = vec![
+            release(provider, "2160p", Some("HEVC"), 18 << 30),
+            release(provider, "1080p", Some("H.264"), 9 << 30),
+            release(provider, "1080p", Some("HEVC"), 3 << 30),
+            release(provider, "1080p", Some("HEVC"), 3 << 30),
+            release(provider, "720p", None, 1 << 30),
+        ];
+        app.state.resource_list_state.select(Some(2));
+        app
+    }
+
+    #[tokio::test]
+    async fn wordpress_season_download_asks_which_quality_every_time() {
+        for provider in [
+            ProviderKind::UhdMovies,
+            ProviderKind::Moviesmod,
+            ProviderKind::ToonWorld4All,
+        ] {
+            let mut app = season_app(provider);
+            app.handle_download(Action::DownloadSeason).await;
+
+            assert!(app.state.season_quality_pending, "{provider:?}");
+            assert!(app.state.is_download_subtitle_popup);
+            assert_eq!(app.state.download_queue_total, 0, "nothing queued yet");
+            let labels: Vec<&str> = app
+                .state
+                .subtitle_list
+                .iter()
+                .map(|(l, _)| l.as_str())
+                .collect();
+            assert_eq!(
+                labels.len(),
+                4,
+                "duplicate quality entries collapse: {labels:?}"
+            );
+            assert!(labels[0].starts_with("2160p · HEVC"));
+            // The stream highlighted when the download was started is preselected.
+            assert_eq!(app.state.subtitle_list_state.selected(), Some(2));
+
+            // Confirming applies the highlighted choice and queues the whole season.
+            app.handle_navigation(Action::Submit).await;
+            assert!(!app.state.season_quality_pending);
+            assert!(!app.state.is_download_subtitle_popup);
+            assert_eq!(app.state.download_queue_total, 3);
+            assert_eq!(
+                app.state.season_quality_choice,
+                Some(crate::tui::state::SeasonQuality {
+                    height: 1080,
+                    codec: Some("hevc".into()),
+                    variant: Some("show 1080p hevc".into())
+                })
+            );
+
+            // Each new season download asks again.
+            app.state.download_queue.clear();
+            app.state.download_queue_total = 0;
+            app.handle_download(Action::DownloadSeason).await;
+            assert!(app.state.season_quality_pending);
+            assert!(app.state.season_quality_choice.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_season_quality_prompt_queues_nothing() {
+        let mut app = season_app(ProviderKind::UhdMovies);
+        app.handle_download(Action::DownloadSeason).await;
+        assert!(app.state.season_quality_pending);
+
+        app.handle_navigation(Action::GoBack).await;
+
+        assert!(!app.state.season_quality_pending);
+        assert!(!app.state.is_download_subtitle_popup);
+        assert!(app.state.subtitle_list.is_empty());
+        assert_eq!(app.state.download_queue_total, 0);
+        assert!(app.state.season_quality_choice.is_none());
+    }
+
+    #[tokio::test]
+    async fn season_download_is_unchanged_for_other_providers() {
+        for provider in [ProviderKind::MovieBox, ProviderKind::FourKHdHub] {
+            let mut app = season_app(provider);
+            app.handle_download(Action::DownloadSeason).await;
+            assert!(
+                !app.state.season_quality_pending,
+                "{provider:?} must not prompt"
+            );
+            assert_eq!(app.state.download_queue_total, 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn season_prompt_is_skipped_while_streams_load_or_are_unknown() {
+        let mut app = season_app(ProviderKind::UhdMovies);
+        app.state.is_fetching_streams = true;
+        app.handle_download(Action::DownloadSeason).await;
+        assert!(!app.state.season_quality_pending);
+        assert_eq!(app.state.download_queue_total, 3);
+
+        let mut app = season_app(ProviderKind::Moviesmod);
+        app.state.selected_resources = vec![Release {
+            quality: None,
+            ..release(ProviderKind::Moviesmod, "x", None, 1)
+        }];
+        app.handle_download(Action::DownloadSeason).await;
+        assert!(!app.state.season_quality_pending);
+        assert_eq!(app.state.download_queue_total, 3);
+    }
+
+    #[test]
+    fn season_quality_matches_resolution_then_codec_then_nearest() {
+        use crate::tui::state::SeasonQuality;
+        let list = vec![
+            release(ProviderKind::UhdMovies, "2160p", Some("HEVC"), 1),
+            release(ProviderKind::UhdMovies, "1080p", Some("H.264"), 1),
+            release(ProviderKind::UhdMovies, "1080p", Some("HEVC"), 1),
+            release(ProviderKind::UhdMovies, "720p", Some("H.264"), 1),
+        ];
+        let pick = |height, codec: Option<&str>| {
+            SeasonQuality {
+                height,
+                codec: codec.map(str::to_string),
+                variant: None,
+            }
+            .pick(&list)
+        };
+        assert_eq!(pick(1080, Some("hevc")), Some(2));
+        assert_eq!(pick(1080, Some("h.264")), Some(1));
+        // Same resolution, codec missing from this episode: first release of that resolution.
+        assert_eq!(pick(1080, Some("av1")), Some(1));
+        // Resolution missing: nearest, preferring the lower one on a tie.
+        assert_eq!(pick(480, None), Some(3));
+        assert_eq!(pick(900, None), Some(3));
+        assert_eq!(pick(1500, None), Some(1));
+        assert_eq!(
+            SeasonQuality::from_key("1080|hevc").unwrap().pick(&list),
+            Some(2)
+        );
+        assert_eq!(SeasonQuality::from_key("720|").unwrap().codec, None);
+        assert!(SeasonQuality::from_key("junk").is_none());
+        assert_eq!(
+            SeasonQuality {
+                height: 1080,
+                codec: None,
+                variant: None
+            }
+            .pick(&[]),
+            None
+        );
+        assert_eq!(SeasonQuality::from_key("720|").unwrap().codec, None);
+    }
+
+    #[test]
+    fn season_quality_tells_apart_encodes_without_a_detected_codec() {
+        use crate::tui::state::{SeasonQuality, variant_of};
+        let named = |name: &str, quality: &str, size: u64| Release {
+            filename: name.to_string(),
+            codec: None,
+            ..release(ProviderKind::UhdMovies, quality, None, size)
+        };
+        // Real UHDMovies release names: per-episode size, zip and episode notes are not part of
+        // the variant, so each episode of the season yields the same descriptor.
+        let ep1 = [
+            named(
+                "Season 1 2160p 4k SDR Web-DL [ 6 GB/ E ] [37 GB ZIP] Episode 1",
+                "2160p",
+                6 << 30,
+            ),
+            named(
+                "Season 1 2160p 4k 10bit [Low Quality] [ 1.7 GB/ E ] [10 GB ZIP] Episode 1",
+                "2160p",
+                2 << 30,
+            ),
+            named(
+                "Season 1 1080p Remux [ 11 GB/ E ] Episode 1",
+                "1080p",
+                11 << 30,
+            ),
+            named(
+                "Season 1 1080p 10bit [ 2 GB/ E ] [15 GB ZIP] Episode 1",
+                "1080p",
+                2 << 30,
+            ),
+        ];
+        let ep2 = [
+            named(
+                "Season 1 2160p 4k SDR Web-DL [ 5.5 GB/ E ] [37 GB ZIP] Episode 2",
+                "2160p",
+                5 << 30,
+            ),
+            named(
+                "Season 1 2160p 4k 10bit [Low Quality] [ 1.6 GB/ E ] [10 GB ZIP] Episode 2",
+                "2160p",
+                2 << 30,
+            ),
+            named(
+                "Season 1 1080p Remux [ 12 GB/ E ] Episode 2",
+                "1080p",
+                12 << 30,
+            ),
+            named(
+                "Season 1 1080p 10bit [ 1.9 GB/ E ] [15 GB ZIP] Episode 2",
+                "1080p",
+                2 << 30,
+            ),
+        ];
+        assert_eq!(variant_of(&ep1[0]).0, variant_of(&ep2[0]).0);
+        assert_eq!(variant_of(&ep1[1]).1, "2160p 4k 10bit [Low Quality]");
+        // Two 2160p encodes with no codec stay distinct keys, and the low-quality one is
+        // found again in the next episode.
+        let low = SeasonQuality::from_key(&SeasonQuality::key_for(&ep1[1])).unwrap();
+        assert_ne!(
+            SeasonQuality::key_for(&ep1[0]),
+            SeasonQuality::key_for(&ep1[1])
+        );
+        assert_eq!(low.pick(&ep2), Some(1));
+        let remux = SeasonQuality::from_key(&SeasonQuality::key_for(&ep1[2])).unwrap();
+        assert_eq!(remux.pick(&ep2), Some(2));
+        let ten_bit = SeasonQuality::from_key(&SeasonQuality::key_for(&ep1[3])).unwrap();
+        assert_eq!(ten_bit.pick(&ep2), Some(3));
+        // An episode lacking that variant falls back to the same resolution.
+        assert_eq!(remux.pick(&ep2[..2]), Some(0));
+        // Moviesmod style names drop their size, season and episode text too.
+        let moviesmod = named(
+            "Breaking Bad (Season 1 - 5) Dual Audio {Hindi-English} BluRay S01E01 Season 1 { Hindi-English } 720p x264 Esubs [500MB] Episode Links Episode 1",
+            "720p",
+            500 << 20,
+        );
+        assert!(variant_of(&moviesmod).0.contains("720p x264 esubs"));
+        assert!(!variant_of(&moviesmod).0.contains("500mb"));
+        assert!(!variant_of(&moviesmod).0.contains("s01e01"));
+    }
+
+    #[tokio::test]
+    async fn failed_resolve_mid_season_halts_the_queue_and_frees_the_next_download() {
+        let mut app = season_app(ProviderKind::UhdMovies);
+        app.state.download_queue_total = 3;
+        app.state.download_queue.push_back((1, 3));
+        app.state.is_resolving_playback = true;
+
+        app.handle_download(Action::DownloadFailed(
+            "UHDMovies unavailable: No working direct media link".into(),
+        ))
+        .await;
+
+        assert!(
+            !app.state.is_resolving_playback,
+            "next download must not be ignored"
+        );
+        assert_eq!(app.state.download_queue_total, 0);
+        assert!(app.state.download_queue.is_empty());
+        let note = app.state.notifications.back().expect("notification posted");
+        assert_eq!(note.kind, NotificationKind::Error);
+        assert_eq!(note.title, "Season download halted");
     }
 }

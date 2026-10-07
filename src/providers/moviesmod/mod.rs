@@ -1,6 +1,9 @@
 //! Moviesmod catalog, season/episode pages and download-link pages.
 mod parser;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use futures::{StreamExt, stream};
 use reqwest::{StatusCode, Url};
 
@@ -79,6 +82,7 @@ impl MoviesmodClient {
             buttons.iter().any(|button| button.season == season)
                 && buttons.iter().any(|button| button.season != season)
         });
+        let failed_pages = Arc::new(AtomicUsize::new(0));
         let pages = stream::iter(
             buttons
                 .into_iter()
@@ -88,11 +92,15 @@ impl MoviesmodClient {
         .map(|button| {
             let client = client.clone();
             let title = title.clone();
+            let failed_pages = failed_pages.clone();
             async move {
                 if drive::is_media_url(&button.url) || drive::is_drive_page(&button.url) {
                     return parser::links(&button, &title, is_series, None);
                 }
-                let page = drive::link_page(&client, &button.url).await.ok()?;
+                let Ok(page) = link_page_retrying(&client, &button.url).await else {
+                    failed_pages.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                };
                 if page.html.is_none() || drive::is_media_url(&page.url) {
                     let mut direct = button;
                     direct.url = page.url;
@@ -130,6 +138,12 @@ impl MoviesmodClient {
                 releases.push(release);
             }
         }
+        // A post whose every page failed to load is a transient outage, not "no such release".
+        if releases.is_empty() && failed_pages.load(Ordering::Relaxed) > 0 {
+            return Err(ProviderError::Unavailable(
+                "Moviesmod download pages did not load; try again in a moment".into(),
+            ));
+        }
         if is_series {
             details.seasons = site::seasons(&releases);
         }
@@ -143,6 +157,22 @@ impl MoviesmodClient {
     ) -> Result<PlaybackSource, ProviderError> {
         drive::resolve_release(&self.client, release, ProviderKind::Moviesmod, intent).await
     }
+}
+
+/// The site rate-limits bursts of page fetches; a failed page usually loads on the next try.
+async fn link_page_retrying(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+) -> Result<drive::Page, ProviderError> {
+    let mut result = drive::link_page(client, url).await;
+    for delay_ms in [300_u64, 900] {
+        if result.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        result = drive::link_page(client, url).await;
+    }
+    result
 }
 
 impl Provider for MoviesmodClient {
@@ -434,5 +464,73 @@ mod search_tests {
                 .is_empty()
         );
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serves a post with one episode-links button; the episode page answers 503 until it has been
+    /// asked `fail_first` times.
+    async fn serve(fail_first: usize) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0_u8; 1024];
+                let count = stream.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..count]);
+                let path = request.split_whitespace().nth(1).unwrap_or_default();
+                let (status, body) = match path {
+                    "/show/" => (
+                        "200 OK",
+                        "<meta property='og:title' content='Download Show Season 2 1080p'><div class='thecontent'><h3>Season 2 720p [1GB]</h3><p><a class='maxbutton-episode-links' href='/episodes/'>Episode Links</a></p></div>",
+                    ),
+                    "/episodes/" if seen.fetch_add(1, Ordering::SeqCst) < fail_first => {
+                        ("503 Service Unavailable", "busy")
+                    }
+                    "/episodes/" => (
+                        "200 OK",
+                        "<h3><a href='/first.mkv'>Episode 1</a></h3><h3><a href='/second.mkv'>Episode 2</a></h3>",
+                    ),
+                    _ => ("404 Not Found", ""),
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn transient_link_page_failures_are_retried() {
+        let (base, server) = serve(2).await;
+        let client = MoviesmodClient::with_base_url(&base).unwrap();
+        let releases = ReleaseProvider::episode_streams(&client, "/show/", 2, 2)
+            .await
+            .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].episode, Some(2));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn every_link_page_failing_is_an_error_not_an_empty_list() {
+        let (base, server) = serve(usize::MAX).await;
+        let client = MoviesmodClient::with_base_url(&base).unwrap();
+        let result = ReleaseProvider::episode_streams(&client, "/show/", 2, 2).await;
+        assert!(matches!(result, Err(ProviderError::Unavailable(_))));
+        server.abort();
     }
 }

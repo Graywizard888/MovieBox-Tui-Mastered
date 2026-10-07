@@ -236,6 +236,7 @@ impl App {
         subtitle: Option<String>,
         headers: Vec<(String, String)>,
         max_height: Option<u64>,
+        seek_emulation: bool,
     ) {
         if !crate::tui::text::is_http_url(&link) {
             self.state.is_playing = false;
@@ -377,7 +378,11 @@ impl App {
             let has_extra_headers = headers.iter().any(|(name, _)| {
                 !name.eq_ignore_ascii_case("referer") && !name.eq_ignore_ascii_case("user-agent")
             });
+            let seek_limit = seek_emulation
+                .then(crate::proxy::seek_emulation_limit)
+                .flatten();
             let needs_proxy = is_dash
+                || seek_limit.is_some()
                 || (matches!(
                     kind,
                     crate::tui::state::PlayerKind::Vlc
@@ -391,7 +396,13 @@ impl App {
 
             let mut sidecar_child = None;
             let (effective_link, effective_subtitle) = if needs_proxy {
-                match crate::proxy::spawn_sidecar(&link, &headers, sidecar_sub, max_height) {
+                match crate::proxy::spawn_sidecar(
+                    &link,
+                    &headers,
+                    sidecar_sub,
+                    max_height,
+                    seek_limit,
+                ) {
                     Ok((local_url, sc_child)) => {
                         sidecar_child = Some(sc_child);
                         let sub_url =
@@ -420,11 +431,13 @@ impl App {
                         (local_url, sub_url)
                     }
                     Err(err) => {
-                        if matches!(
-                            kind,
-                            crate::tui::state::PlayerKind::Mpv
-                                | crate::tui::state::PlayerKind::Iina
-                        ) {
+                        if seek_limit.is_some()
+                            || matches!(
+                                kind,
+                                crate::tui::state::PlayerKind::Mpv
+                                    | crate::tui::state::PlayerKind::Iina
+                            )
+                        {
                             log::warn!(
                                 "Failed to spawn stream proxy sidecar ({err}), falling back to direct playback"
                             );
@@ -473,6 +486,21 @@ impl App {
                     cmd.spawn()
                 };
             let is_android = matches!(kind, crate::tui::state::PlayerKind::AndroidIntent);
+            let android_media = history_item.as_ref().map(|item| {
+                // Same title -> same key on every launch, whatever the proxy port or token is.
+                let episode_tag = if item.season > 0 || item.episode > 0 {
+                    format!(" S{:02}E{:02}", item.season, item.episode)
+                } else {
+                    String::new()
+                };
+                crate::player::AndroidMedia {
+                    identifier: format!(
+                        "moviebox:{}:{}:{}:{}",
+                        item.provider, item.subject_id, item.season, item.episode
+                    ),
+                    title: format!("{}{episode_tag}", item.title),
+                }
+            });
             let command = crate::tui::player::command(
                 kind,
                 &effective_link,
@@ -498,6 +526,7 @@ impl App {
                     &effective_link,
                     effective_subtitle.as_deref(),
                     &headers,
+                    android_media.as_ref(),
                 );
                 let mut spawned = None;
                 let mut last_err = None;
@@ -534,6 +563,7 @@ impl App {
                     let fallback_link = effective_link.clone();
                     let fallback_sub = effective_subtitle.clone();
                     let fallback_headers = headers.clone();
+                    let fallback_media = android_media.clone();
                     tokio::task::spawn_blocking(move || {
                         let result = child.wait();
                         let error_output = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -612,6 +642,7 @@ impl App {
                                                 &fallback_link,
                                                 fallback_sub.as_deref(),
                                                 &fallback_headers,
+                                                fallback_media.as_ref(),
                                             );
                                         fallback_cmd.stdin(std::process::Stdio::null());
                                         fallback_cmd.stdout(std::process::Stdio::null());
@@ -794,6 +825,7 @@ impl App {
                             subtitle: None,
                             source_label: first_mirror.label.clone(),
                             max_height,
+                            seekable: None,
                         };
                         if matches!(
                             release.provider,
@@ -923,6 +955,7 @@ impl App {
                         subtitle: None,
                         source_label: first_mirror.label.clone(),
                         max_height,
+                        seekable: None,
                     };
                     let subject_id = self.state.active_subject_id.clone().unwrap_or_default();
                     let resource_id = self.get_selected_resource_id();
@@ -1011,6 +1044,7 @@ impl App {
                             subtitle: None,
                             source_label: "Direct".to_string(),
                             max_height: None,
+                            seekable: None,
                         };
                         self.dispatch_playback_or_notify(source);
                     }
@@ -1045,12 +1079,14 @@ impl App {
                     );
                     return None;
                 }
+                let seek_emulation = source.seekable == Some(false);
                 self.launch_player(
                     kind,
                     source.url,
                     source.subtitle,
                     source.headers,
                     source.max_height,
+                    seek_emulation,
                 );
             }
             Action::DispatchPlayback(source) => {
@@ -1372,6 +1408,7 @@ mod tests {
             subtitle: None,
             source_label: "Multi-Res".to_string(),
             max_height: None,
+            seekable: None,
         };
 
         assert_eq!(
@@ -1392,6 +1429,7 @@ mod tests {
             subtitle: None,
             source_label: "Direct".to_string(),
             max_height: None,
+            seekable: None,
         };
 
         app.dispatch_playback_or_notify(source);
@@ -1419,6 +1457,7 @@ mod tests {
             subtitle: None,
             source_label: "Multi-Res".to_string(),
             max_height: None,
+            seekable: None,
         };
 
         let resolution = app.resolve_playback_player(&source);
@@ -1448,6 +1487,7 @@ mod tests {
             subtitle: None,
             source_label: "Multi-Res".to_string(),
             max_height: None,
+            seekable: None,
         };
 
         let resolution = app.resolve_playback_player(&source);
@@ -1484,6 +1524,7 @@ mod tests {
             subtitle: None,
             source_label: "CircleFTP".to_string(),
             max_height: None,
+            seekable: None,
         };
         assert_eq!(
             app.resolve_playback_player(&bdix_source),
@@ -1500,6 +1541,7 @@ mod tests {
             subtitle: None,
             source_label: "1080p".to_string(),
             max_height: None,
+            seekable: None,
         };
         assert_eq!(
             app.resolve_playback_player(&fourk_source),
@@ -1513,6 +1555,7 @@ mod tests {
             subtitle: None,
             source_label: "Multi-Res".to_string(),
             max_height: None,
+            seekable: None,
         };
         assert_eq!(
             app.resolve_playback_player(&auth_source),

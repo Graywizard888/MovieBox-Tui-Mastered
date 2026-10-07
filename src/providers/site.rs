@@ -180,15 +180,27 @@ pub(super) fn network_error(error: reqwest::Error) -> ProviderError {
     ProviderError::Network(error.without_url().to_string())
 }
 
-pub(super) fn check_page(html: &str) -> Result<(), ProviderError> {
+fn verification_required() -> ProviderError {
+    ProviderError::Unavailable("Browser verification required by site; try another mirror".into())
+}
+
+/// Cloudflare-style challenges only. Link-gate hops (timer + "Click here to continue") are
+/// ordinary pages that a plain HTTP client can pass, so they use this instead of `check_page`.
+pub(super) fn check_challenge(html: &str) -> Result<(), ProviderError> {
     let lower = html.to_ascii_lowercase();
     if lower.contains("cf-chl-")
         || (lower.contains("just a moment") && lower.contains("cloudflare"))
-        || (lower.contains("not a robot") && lower.contains("click here to continue"))
     {
-        return Err(ProviderError::Unavailable(
-            "Browser verification required by site; try another mirror".into(),
-        ));
+        return Err(verification_required());
+    }
+    Ok(())
+}
+
+pub(super) fn check_page(html: &str) -> Result<(), ProviderError> {
+    check_challenge(html)?;
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("not a robot") && lower.contains("click here to continue") {
+        return Err(verification_required());
     }
     Ok(())
 }
@@ -536,23 +548,11 @@ pub(super) fn episode_marker(text: &str, default_season: usize) -> Option<(usize
     ))
 }
 
+/// Resolution tag of a release label (see [`super::models::label_resolution`]).
 pub(super) fn quality(label: &str) -> Option<String> {
-    let lower = label.to_ascii_lowercase();
-    if lower.contains("2160p") || lower.contains("4k") {
-        return Some("2160p".into());
-    }
-    // UHDMovies calls some 1080p encodes "1080p UHD". An explicit resolution is
-    // more trustworthy than the site's generic UHD branding.
-    ["1440p", "1080p", "720p", "480p", "360p"]
-        .into_iter()
-        .find(|q| lower.contains(q))
-        .map(str::to_string)
-        .or_else(|| {
-            lower
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|word| word == "uhd")
-                .then(|| "2160p".into())
-        })
+    super::models::label_resolution(label)
+        .filter(|height| *height != 576 && *height != 540)
+        .map(|height| format!("{height}p"))
 }
 
 pub(super) fn release(

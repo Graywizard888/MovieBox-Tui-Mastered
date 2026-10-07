@@ -235,48 +235,27 @@ pub fn provider_badge_span<'a>(
 }
 
 pub fn extract_resolution(title: &str, quality: Option<&str>) -> Option<i64> {
+    // Whole-token matching only; see `label_resolution` for why substrings are wrong here.
     if let Some(q) = quality {
-        let q_lower = q.trim().to_ascii_lowercase();
-        if q_lower.contains("2160") || q_lower.contains("4k") || q_lower.contains("uhd") {
-            return Some(2160);
-        } else if q_lower.contains("1080") || q_lower.contains("fhd") {
-            return Some(1080);
-        } else if q_lower.contains("720") || q_lower.contains("hd") {
-            return Some(720);
-        } else if q_lower.contains("540") {
-            return Some(540);
-        } else if q_lower.contains("480") || q_lower.contains("sd") {
-            return Some(480);
-        } else if q_lower.contains("576") {
-            return Some(576);
-        } else if q_lower.contains("360") {
-            return Some(360);
+        if let Some(height) = crate::providers::models::label_resolution(q) {
+            return Some(height as i64);
+        }
+        let named = q
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .find_map(|word| match word {
+                "uhd" => Some(2160),
+                "fhd" => Some(1080),
+                "hd" => Some(720),
+                "sd" => Some(480),
+                _ => None,
+            });
+        if named.is_some() {
+            return named;
         }
     }
-
-    let title_lower = title.to_ascii_lowercase();
-    if title_lower.contains("2160p")
-        || title_lower.contains("2160")
-        || title_lower.contains("4k")
-        || title_lower.contains("uhd")
-    {
-        Some(2160)
-    } else if title_lower.contains("1080p")
-        || title_lower.contains("1080")
-        || title_lower.contains("fhd")
-    {
-        Some(1080)
-    } else if title_lower.contains("720p") || title_lower.contains("720") {
-        Some(720)
-    } else if title_lower.contains("480p") || title_lower.contains("480") {
-        Some(480)
-    } else if title_lower.contains("576p") || title_lower.contains("576") {
-        Some(576)
-    } else if title_lower.contains("360p") || title_lower.contains("360") {
-        Some(360)
-    } else {
-        None
-    }
+    // Titles are free text, where a bare number is just a word ("360", "1408").
+    crate::providers::models::title_resolution(title).map(|height| height as i64)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -578,5 +557,22 @@ mod tests {
         assert_eq!(extract_resolution("Movie 720p WEB", None), Some(720));
         assert_eq!(extract_resolution("Movie", Some("2160p")), Some(2160));
         assert_eq!(extract_resolution("Plain Title", None), None);
+        // Titles are free text: numbers and substrings inside words are not resolutions.
+        for title in [
+            "360",
+            "1408",
+            "The 480 Club",
+            "Kingdom of Heaven 720 Days",
+            "Fahrenheit 451",
+            "Park4kids",
+            "Suhd Story",
+            "Movie.4KHDHub.Com",
+            "Hd Cut",
+        ] {
+            assert_eq!(extract_resolution(title, None), None, "{title}");
+        }
+        assert_eq!(extract_resolution("Film 2160p HDR", None), Some(2160));
+        assert_eq!(extract_resolution("Film [4K]", None), Some(2160));
+        assert_eq!(extract_resolution("Film 1080p UHD 4K", None), Some(1080));
     }
 }

@@ -305,13 +305,13 @@ impl App {
                     self.state.show_settings_popup = true;
                     self.state.settings_category = crate::tui::state::SettingsCategory::General;
                     self.state.settings_selected_row = 0;
-                    self.state.settings_download_dir_input = None;
+                    self.state.settings_text_input = None;
                     self.state.settings_player_picker = false;
                     self.state.show_sources_popup = false;
                     self.state.input_mode = crate::tui::state::InputMode::Normal;
                 } else {
                     self.state.show_settings_popup = false;
-                    self.state.settings_download_dir_input = None;
+                    self.state.settings_text_input = None;
                     self.state.settings_player_picker = false;
                     self.state.show_sources_popup = false;
                     self.persist_config();
@@ -324,7 +324,7 @@ impl App {
 
             Action::SettingsResetDownloadDir => {
                 self.state.download_dir = None;
-                self.state.settings_download_dir_input = None;
+                self.state.settings_text_input = None;
                 self.persist_config();
                 let default_dir = crate::logging::sanitize_path(
                     crate::service::resolve_download_dir(self.state.download_dir.as_deref()),
@@ -441,7 +441,7 @@ impl App {
                             }
                         }
                         2 => {
-                            if let Some(input) = self.state.settings_download_dir_input.take() {
+                            if let Some(input) = self.state.settings_text_input.take() {
                                 let new_path = input.as_str().trim();
                                 if let Some(pb) =
                                     crate::tui::state::AppState::expand_download_path(new_path)
@@ -474,7 +474,18 @@ impl App {
                                     .as_ref()
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_default();
-                                self.state.settings_download_dir_input =
+                                self.state.settings_text_input =
+                                    Some(crate::tui::text::TextInputBuffer::from_str(&current));
+                            }
+                        }
+                        3 => {
+                            if let Some(input) = self.state.settings_text_input.take() {
+                                self.save_toonworld_cookie(input);
+                            } else {
+                                let current = crate::providers::toonworld4all::cookie::current()
+                                    .map(|saved| saved.value)
+                                    .unwrap_or_default();
+                                self.state.settings_text_input =
                                     Some(crate::tui::text::TextInputBuffer::from_str(&current));
                             }
                         }
@@ -589,7 +600,8 @@ impl App {
                             );
                         }
                         4 => {
-                            const REPO_URL: &str = "https://github.com/mesamirh/MovieBox-Tui";
+                            const REPO_URL: &str =
+                                "https://github.com/Graywizard888/MovieBox-Tui-Mastered";
                             match crate::net::open_external_url(REPO_URL) {
                                 Ok(()) => {
                                     self.state.notify(
@@ -976,6 +988,48 @@ impl App {
             _ => return None,
         }
         None
+    }
+
+    /// Saves what was pasted in the Settings cookie field; an empty value clears the cookie.
+    fn save_toonworld_cookie(&mut self, input: crate::tui::text::TextInputBuffer) {
+        use crate::providers::toonworld4all::cookie;
+        match cookie::normalize(input.as_str()) {
+            Err(message) => {
+                // Keep what was typed so it can be fixed.
+                self.state.settings_text_input = Some(input);
+                self.state
+                    .notify(NotificationKind::Error, "ToonWorld Cookie", message);
+            }
+            Ok(None) => self.clear_toonworld_cookie(),
+            Ok(Some(value)) => match cookie::save(Some(&value)) {
+                Ok(_) => self.state.notify(
+                    NotificationKind::Success,
+                    "ToonWorld Cookie",
+                    "Cookie saved and used from the next ToonWorld4All link (the site's pass \
+                     lasts about 24 hours).",
+                ),
+                Err(error) => self.state.notify(
+                    NotificationKind::Error,
+                    "ToonWorld Cookie",
+                    format!("Could not save the cookie: {error}"),
+                ),
+            },
+        }
+    }
+
+    pub(super) fn clear_toonworld_cookie(&mut self) {
+        match crate::providers::toonworld4all::cookie::save(None) {
+            Ok(_) => self.state.notify(
+                NotificationKind::Success,
+                "ToonWorld Cookie",
+                "Saved cookie removed.",
+            ),
+            Err(error) => self.state.notify(
+                NotificationKind::Error,
+                "ToonWorld Cookie",
+                format!("Could not remove the cookie: {error}"),
+            ),
+        }
     }
 
     fn toggle_provider(&mut self, provider: crate::providers::models::ProviderKind) {

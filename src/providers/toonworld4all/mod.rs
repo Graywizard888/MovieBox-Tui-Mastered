@@ -1,6 +1,7 @@
 //! ToonWorld4All WordPress catalog, episode archive and link validation.
 //! Search/details use the public WP API when available; HTML posts are a fallback. Movie
 //! mirrors and archive redirects are not media URLs and are resolved only when selected.
+pub mod cookie;
 mod parser;
 mod resolver;
 
@@ -139,10 +140,9 @@ impl ToonWorld4AllClient {
         // WordPress permalinks normally end with '/', which is an empty final segment.
         let slug = url
             .path_segments()
-            .and_then(|segments| {
+            .and_then(|mut segments| {
                 segments
-                    .filter(|segment| !segment.is_empty())
-                    .next_back()
+                    .rfind(|segment| !segment.is_empty())
                     .map(str::to_string)
             })
             .filter(|slug| !slug.contains('/'))

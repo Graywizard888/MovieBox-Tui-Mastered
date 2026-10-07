@@ -79,6 +79,7 @@ pub enum Action {
     SelectBrowse(crate::tui::state::BrowsePreset),
     SelectAddonCatalog(crate::providers::addons::models::AddonCatalogTarget),
     DownloadStream(Option<String>),
+    SetDownloadExtension(&'static str),
     StartDownload(
         Option<String>,
         Option<String>,

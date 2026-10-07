@@ -330,11 +330,26 @@ pub fn android_openers() -> &'static [AndroidOpener] {
     ANDROID_OPENERS.as_slice()
 }
 
+/// Stable identity of what is being played, for external Android players that remember a resume
+/// position per stream. The local proxy URL (random port) and tokenised upstream URLs change on
+/// every launch, so without this the player never recognises a title it has already seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidMedia {
+    pub identifier: String,
+    pub title: String,
+}
+
 fn append_android_intent_extras(
     cmd: &mut Command,
     subtitle: Option<&str>,
     headers: &[(String, String)],
+    media: Option<&AndroidMedia>,
 ) {
+    if let Some(media) = media {
+        cmd.arg("-e").arg("media_identifier").arg(&media.identifier);
+        cmd.arg("-e").arg("title").arg(&media.title);
+        cmd.arg("-e").arg("filename").arg(&media.title);
+    }
     if let Some(sub) = subtitle {
         cmd.arg("-e").arg("subtitles_location").arg(sub);
         cmd.arg("--eu").arg("subtitles_location").arg(sub);
@@ -360,6 +375,7 @@ pub fn android_intent_command_for_opener(
     url: &str,
     subtitle: Option<&str>,
     headers: &[(String, String)],
+    media: Option<&AndroidMedia>,
 ) -> Command {
     match opener {
         AndroidOpener::TermuxOpen(path) => {
@@ -384,7 +400,7 @@ pub fn android_intent_command_for_opener(
                 .arg(url)
                 .arg("-t")
                 .arg("video/*");
-            append_android_intent_extras(&mut cmd, subtitle, headers);
+            append_android_intent_extras(&mut cmd, subtitle, headers, media);
             cmd
         }
         #[cfg(target_os = "android")]
@@ -399,7 +415,7 @@ pub fn android_intent_command_for_opener(
                 .arg(url)
                 .arg("-t")
                 .arg("video/*");
-            append_android_intent_extras(&mut cmd, subtitle, headers);
+            append_android_intent_extras(&mut cmd, subtitle, headers, media);
             let current_path = std::env::var("PATH").unwrap_or_default();
             cmd.env("PATH", format!("/system/bin:/system/xbin:{current_path}"));
             cmd.env_remove("LD_LIBRARY_PATH");
@@ -413,6 +429,7 @@ pub fn android_intent_commands(
     url: &str,
     subtitle: Option<&str>,
     headers: &[(String, String)],
+    media: Option<&AndroidMedia>,
 ) -> Vec<(AndroidOpener, Command)> {
     let openers = android_openers();
     if openers.is_empty() {
@@ -426,7 +443,7 @@ pub fn android_intent_commands(
     openers
         .iter()
         .map(|opener| {
-            let cmd = android_intent_command_for_opener(opener, url, subtitle, headers);
+            let cmd = android_intent_command_for_opener(opener, url, subtitle, headers, media);
             (opener.clone(), cmd)
         })
         .collect()
@@ -437,7 +454,7 @@ fn android_intent_command(
     subtitle: Option<&str>,
     headers: &[(String, String)],
 ) -> Command {
-    let commands = android_intent_commands(url, subtitle, headers);
+    let commands = android_intent_commands(url, subtitle, headers, None);
     commands
         .into_iter()
         .next()
@@ -1677,6 +1694,36 @@ mod tests {
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn android_intent_carries_a_stable_resume_identity() {
+        let media = AndroidMedia {
+            identifier: "moviebox:moviesmod:/show/:1:2".into(),
+            title: "Show S01E02".into(),
+        };
+        let opener = AndroidOpener::TermuxAm("termux-am".into());
+        let cmd = android_intent_command_for_opener(
+            &opener,
+            "http://127.0.0.1:1/x",
+            None,
+            &[],
+            Some(&media),
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let pair = |k: &str, v: &str| {
+            args.windows(3)
+                .any(|w| w[0] == "-e" && w[1] == k && w[2] == v)
+        };
+        assert!(pair("media_identifier", "moviebox:moviesmod:/show/:1:2"));
+        assert!(pair("title", "Show S01E02"));
+
+        let plain =
+            android_intent_command_for_opener(&opener, "http://127.0.0.1:1/x", None, &[], None);
+        assert!(!plain.get_args().any(|a| a == "media_identifier"));
+    }
+
+    #[test]
     fn test_android_intent_commands_fallback_order() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let temp_dir =
@@ -1692,7 +1739,7 @@ mod tests {
             std::env::set_var("TERMUX_VERSION", "0.118.0");
             std::env::set_var("PREFIX", temp_dir.to_str().unwrap());
         }
-        let commands = android_intent_commands("https://example.test/stream.m3u8", None, &[]);
+        let commands = android_intent_commands("https://example.test/stream.m3u8", None, &[], None);
         unsafe {
             std::env::remove_var("TERMUX_VERSION");
             std::env::remove_var("PREFIX");

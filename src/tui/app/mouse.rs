@@ -197,7 +197,7 @@ impl App {
                 crate::tui::overlay::settings_modal_layout(area, self.state.settings_category);
             if !popup.contains(ratatui::layout::Position::new(col, row)) {
                 self.state.show_settings_popup = false;
-                self.state.settings_download_dir_input = None;
+                self.state.settings_text_input = None;
                 self.persist_config();
                 return true;
             }
@@ -219,6 +219,10 @@ impl App {
                 col,
                 row,
             ) {
+                if clicked_row != self.state.settings_selected_row {
+                    // An open text field belongs to the row it was opened on.
+                    self.state.settings_text_input = None;
+                }
                 self.state.settings_selected_row = clicked_row;
                 self.action_sender.send(Action::SettingsActivateRow).ok();
                 return true;
@@ -358,7 +362,13 @@ impl App {
                 .state
                 .subtitle_list
                 .iter()
-                .map(|(name, _)| format!("  {}  ", crate::tui::text::format_subtitle_label(name)))
+                .map(|(name, _)| {
+                    if self.state.season_quality_pending {
+                        format!("  {name}  ")
+                    } else {
+                        format!("  {}  ", crate::tui::text::format_subtitle_label(name))
+                    }
+                })
                 .collect::<Vec<_>>();
             let confirm_label = if self.state.is_download_subtitle_popup {
                 "Download"
@@ -366,7 +376,16 @@ impl App {
                 "Use"
             };
             match click_in_picker(
-                crate::tui::overlay::picker_layout(area, &items, confirm_label, 20),
+                crate::tui::overlay::picker_layout(
+                    area,
+                    &items,
+                    confirm_label,
+                    if self.state.season_quality_pending {
+                        48
+                    } else {
+                        20
+                    },
+                ),
                 col,
                 row,
                 &self.state.subtitle_list_state,
@@ -378,6 +397,9 @@ impl App {
                     self.action_sender.send(Action::Submit).ok();
                 }
                 Some(None) => {}
+                None if self.state.season_quality_pending => {
+                    self.cancel_season_quality_prompt();
+                }
                 None => {
                     let is_dl = self.state.is_download_subtitle_popup;
                     self.state.is_resolving_playback = false;
