@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.4] - 2026-10-07
+
+### Fixed
+- **Long black screen on 2-3 GB UHDMovies / Moviesmod files**: the seek proxy advertises byte ranges, so mpv (StreamX) reads the index at the end of an MKV while opening it, and on a host without ranges that meant downloading the whole file before the first frame. The proxy now recognises Matroska/WebM files and refuses such an end-of-file read (416) when it would take longer than 15 s at the host's measured speed; playback starts at once and seeks find their place by scanning forward, which costs the same download time as before. Measured with a 415 MB file behind a 20 MB/s host: the end read answered in 0.5 ms instead of 20.8 s, and a seek to 30 s took 12.8 s instead of 33.3 s. MP4 files are not affected (they may need their end to start at all). `MOVIEBOX_SEEK_PROXY_END_WAIT_SECS` changes the 15 s allowance; a very large value restores the old behaviour.
+
 ## [1.0.3] - 2026-10-07
 
 ### Added

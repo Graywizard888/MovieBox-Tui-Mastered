@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -117,6 +117,12 @@ struct SeekEmulation {
     parked: Mutex<Option<UpstreamStream>>,
     /// Requests currently streaming; one of them is about to park its connection.
     active: AtomicUsize,
+    /// The file is Matroska/WebM (by its first bytes or content type).
+    matroska: AtomicBool,
+    /// Origin download speed in bytes per second, from the latest sample; `0` until measured.
+    rate_bps: AtomicU64,
+    /// Longest wait an end-of-file read may cost before it is refused (see `end_probe_blocked`).
+    end_probe_wait: Duration,
 }
 
 impl SeekEmulation {
@@ -126,8 +132,52 @@ impl SeekEmulation {
             mode: tokio::sync::Mutex::new(SeekMode::Unknown),
             parked: Mutex::new(None),
             active: AtomicUsize::new(0),
+            matroska: AtomicBool::new(false),
+            rate_bps: AtomicU64::new(0),
+            end_probe_wait: end_probe_wait(),
         }
     }
+}
+
+/// How far from the end of the file a read counts as the player looking for the index.
+const END_PROBE_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_END_PROBE_WAIT_SECS: u64 = 15;
+/// Speed assumed for the wait estimate until the origin has been timed.
+const ASSUMED_RATE_BPS: u64 = 5 * 1024 * 1024;
+const MIN_RATE_SAMPLE_BYTES: u64 = 256 * 1024;
+const MIN_RATE_SAMPLE_TIME: Duration = Duration::from_millis(100);
+const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+
+/// Longest startup wait for an end-of-file read, from `MOVIEBOX_SEEK_PROXY_END_WAIT_SECS`.
+fn end_probe_wait() -> Duration {
+    let secs = std::env::var("MOVIEBOX_SEEK_PROXY_END_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_END_PROBE_WAIT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn is_matroska_content_type(content_type: &str) -> bool {
+    let lower = content_type.to_ascii_lowercase();
+    lower.contains("matroska") || lower.contains("webm")
+}
+
+/// Whether a request for `start..` should be refused instead of answered by downloading and
+/// discarding the file up to there. Matroska players read the index at the end of the file while
+/// opening, which on a host without ranges means the whole download before the first frame;
+/// refused, they play from the start and find their place by scanning. `from` is the offset the
+/// origin connection we would use has already reached.
+fn end_probe_blocked(total: u64, start: u64, from: u64, rate_bps: u64, max_wait: Duration) -> bool {
+    if start < total.saturating_sub(END_PROBE_WINDOW_BYTES) {
+        return false;
+    }
+    let rate = if rate_bps == 0 {
+        ASSUMED_RATE_BPS
+    } else {
+        rate_bps
+    };
+    let skip = start.saturating_sub(from);
+    Duration::from_secs_f64(skip as f64 / rate as f64) > max_wait
 }
 
 /// How long a parked connection is trusted: origins close idle connections after a while.
@@ -184,6 +234,16 @@ fn take_parked(seek: &SeekEmulation, start: u64) -> Option<UpstreamStream> {
         Some(up) if up.pos <= start => slot.take(),
         _ => None,
     }
+}
+
+/// Where the origin connection that would serve offset `start` has got to (`0`: a new one).
+fn parked_position(seek: &SeekEmulation, start: u64) -> u64 {
+    seek.parked
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|up| up.pos))
+        .filter(|pos| *pos <= start)
+        .unwrap_or(0)
 }
 
 async fn take_upstream(seek: &SeekEmulation, start: u64) -> Option<UpstreamStream> {
@@ -837,11 +897,14 @@ async fn consume_chunk<W: AsyncWriteExt + Unpin>(
 /// past `start`; everything before it is discarded. `sent` counts body bytes written.
 async fn pump_range<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
+    seek: &SeekEmulation,
     up: &mut UpstreamStream,
     start: u64,
     length: u64,
     sent: &mut u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let began = Instant::now();
+    let mut received = 0u64;
     while *sent < length {
         if !up.leftover.is_empty() {
             let chunk = std::mem::take(&mut up.leftover);
@@ -866,6 +929,15 @@ async fn pump_range<W: AsyncWriteExt + Unpin>(
                 return Err("upstream idle".into());
             }
         };
+        if up.pos == 0 && chunk.starts_with(&EBML_MAGIC) {
+            seek.matroska.store(true, Ordering::Relaxed);
+        }
+        received += chunk.len() as u64;
+        let elapsed = began.elapsed();
+        if received >= MIN_RATE_SAMPLE_BYTES && elapsed >= MIN_RATE_SAMPLE_TIME {
+            let rate = (received as f64 / elapsed.as_secs_f64()) as u64;
+            seek.rate_bps.store(rate.max(1), Ordering::Relaxed);
+        }
         consume_chunk(writer, up, &chunk, start, length, sent).await?;
     }
     Ok(())
@@ -911,14 +983,18 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
             .and_then(|v| v.parse::<u64>().ok());
         *mode = match total {
             Some(total) if res.status() == reqwest::StatusCode::OK && total <= seek.max_bytes => {
+                let content_type = res
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                if is_matroska_content_type(&content_type) {
+                    seek.matroska.store(true, Ordering::Relaxed);
+                }
                 SeekMode::Emulate(MediaMeta {
                     total,
-                    content_type: res
-                        .headers()
-                        .get(reqwest::header::CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("application/octet-stream")
-                        .to_string(),
+                    content_type,
                 })
             }
             _ => SeekMode::Passthrough,
@@ -944,6 +1020,28 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
         writer.flush().await?;
         return Ok(Some(!client_close));
     };
+    if range_header.is_some()
+        && seek.matroska.load(Ordering::Relaxed)
+        && end_probe_blocked(
+            meta.total,
+            start,
+            parked_position(seek, start),
+            seek.rate_bps.load(Ordering::Relaxed),
+            seek.end_probe_wait,
+        )
+    {
+        log::info!(
+            "seek emulation: refusing the end-of-file read at {start} of {}",
+            meta.total
+        );
+        let response = format!(
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: {conn}\r\n\r\n",
+            meta.total
+        );
+        writer.write_all(response.as_bytes()).await?;
+        writer.flush().await?;
+        return Ok(Some(!client_close));
+    }
     let length = end - start + 1;
     let partial = range_header.is_some() && (start, end) != (0, meta.total.saturating_sub(1));
     let status_line = if partial {
@@ -984,7 +1082,7 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
             },
         };
         let _active = ActiveRequest::begin(&seek.active);
-        match pump_range(writer, &mut up, start, length, &mut sent).await {
+        match pump_range(writer, seek, &mut up, start, length, &mut sent).await {
             Ok(()) => {
                 park_upstream(seek, up, meta.total);
                 break;
@@ -1857,6 +1955,11 @@ mod tests {
                             .map(|v| v.trim().to_string())
                     });
                     let total = data.len();
+                    let content_type = if data.starts_with(b"ftyp") {
+                        "video/mp4"
+                    } else {
+                        "video/x-matroska"
+                    };
                     let hdr;
                     let body: &[u8];
                     match range.filter(|_| honor_range) {
@@ -1866,14 +1969,14 @@ mod tests {
                             let end = e.parse::<usize>().map_or(total - 1, |e| e.min(total - 1));
                             body = &data[start..=end];
                             hdr = format!(
-                                "HTTP/1.1 206 Partial Content\r\nContent-Type: video/x-matroska\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 206 Partial Content\r\nContent-Type: {content_type}\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 body.len()
                             );
                         }
                         None => {
                             body = &data[..];
                             hdr = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: video/x-matroska\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+                                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
                             );
                         }
                     }
@@ -1886,6 +1989,17 @@ mod tests {
     }
 
     async fn spawn_proxy(origin: std::net::SocketAddr, seek_limit: Option<u64>) -> u16 {
+        spawn_proxy_with(
+            origin,
+            seek_limit.map(|max_bytes| Arc::new(SeekEmulation::new(max_bytes))),
+        )
+        .await
+    }
+
+    async fn spawn_proxy_with(
+        origin: std::net::SocketAddr,
+        seek: Option<Arc<SeekEmulation>>,
+    ) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let ctx = ProxyContext {
@@ -1900,7 +2014,7 @@ mod tests {
             max_height: None,
             segment_cache: Arc::new(SegmentCache::default()),
             manifest_cache: Arc::new(Mutex::new(None)),
-            seek: seek_limit.map(|max_bytes| Arc::new(SeekEmulation::new(max_bytes))),
+            seek,
         };
         tokio::spawn(async move {
             loop {
@@ -1988,8 +2102,8 @@ mod tests {
         assert_eq!(connections.load(Ordering::SeqCst), 1);
         // Forward: continues on the same origin connection.
         assert_eq!(
-            fetch("bytes=3000000-3000999").await.as_ref(),
-            &payload[3_000_000..3_001_000]
+            fetch("bytes=1000000-1000999").await.as_ref(),
+            &payload[1_000_000..1_001_000]
         );
         assert_eq!(connections.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -2211,5 +2325,133 @@ mod tests {
                 .is_some()
         );
         server.abort();
+    }
+    #[test]
+    fn end_probe_is_refused_only_near_the_end_and_only_when_slow() {
+        let mib = 1024 * 1024u64;
+        let wait = Duration::from_secs(15);
+        let total = 3000 * mib;
+        let rate = 20 * mib;
+        // Index at the end, connection still near the start: 150 s of skipping.
+        assert!(end_probe_blocked(total, total - 200_000, 0, rate, wait));
+        // Fast host and a smaller file: 5 s is worth waiting for.
+        assert!(!end_probe_blocked(
+            100 * mib,
+            100 * mib - 200_000,
+            0,
+            rate,
+            wait
+        ));
+        // A seek into the middle is a real seek, not an index read.
+        assert!(!end_probe_blocked(total, total / 2, 0, rate, wait));
+        // A connection that is already close to the end makes the skip short.
+        assert!(!end_probe_blocked(
+            total,
+            total - 200_000,
+            total - 20 * mib,
+            rate,
+            wait
+        ));
+        // Unmeasured speed assumes 5 MiB/s: 100 MiB is 20 s.
+        assert!(end_probe_blocked(
+            100 * mib,
+            100 * mib - 200_000,
+            0,
+            0,
+            wait
+        ));
+        assert!(!end_probe_blocked(60 * mib, 60 * mib - 200_000, 0, 0, wait));
+        // A huge allowance turns the guard off.
+        assert!(!end_probe_blocked(
+            total,
+            total - 200_000,
+            0,
+            rate,
+            Duration::from_secs(100_000)
+        ));
+    }
+
+    #[tokio::test]
+    async fn matroska_end_of_file_read_is_refused_and_other_seeks_still_work() {
+        let mut bytes: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
+        bytes[..4].copy_from_slice(&EBML_MAGIC);
+        let payload = Arc::new(bytes);
+        let origin = spawn_origin(Arc::clone(&payload), false).await;
+        let seek = SeekEmulation {
+            end_probe_wait: Duration::ZERO,
+            ..SeekEmulation::new(DEFAULT_SEEK_EMULATION_MAX_BYTES)
+        };
+        let port = spawn_proxy_with(origin, Some(Arc::new(seek))).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+        let get = |range: String| {
+            let url = url.clone();
+            async move {
+                reqwest::Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .build()
+                    .unwrap()
+                    .get(&url)
+                    .header("Range", range)
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let head = get("bytes=0-1023".into()).await;
+        assert_eq!(head.status(), 206);
+        assert_eq!(head.bytes().await.unwrap().as_ref(), &payload[..1024]);
+
+        let total = payload.len();
+        let end = get(format!("bytes={}-", total - 200_000)).await;
+        assert_eq!(end.status(), 416);
+        assert_eq!(
+            end.headers()["content-range"].to_str().unwrap(),
+            format!("bytes */{total}")
+        );
+
+        let middle = get("bytes=1000000-1000999".into()).await;
+        assert_eq!(middle.status(), 206);
+        assert_eq!(
+            middle.bytes().await.unwrap().as_ref(),
+            &payload[1_000_000..1_001_000]
+        );
+    }
+
+    #[tokio::test]
+    async fn end_of_file_read_is_served_for_files_that_are_not_matroska() {
+        // Same layout, but the content is not Matroska (an MP4 may keep its index at the end,
+        // and then the player cannot start without it).
+        let mut bytes: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
+        bytes[..4].copy_from_slice(b"ftyp");
+        let payload = Arc::new(bytes);
+        let origin = spawn_origin(Arc::clone(&payload), false).await;
+        let seek = SeekEmulation {
+            end_probe_wait: Duration::ZERO,
+            ..SeekEmulation::new(DEFAULT_SEEK_EMULATION_MAX_BYTES)
+        };
+        let port = spawn_proxy_with(origin, Some(Arc::new(seek))).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+        let client = reqwest::Client::new();
+        let total = payload.len();
+        let first = client
+            .get(&url)
+            .header("Range", "bytes=0-1023")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.status(), 206);
+        first.bytes().await.unwrap();
+        let end = client
+            .get(&url)
+            .header("Range", format!("bytes={}-", total - 200_000))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(end.status(), 206);
+        assert_eq!(
+            end.bytes().await.unwrap().as_ref(),
+            &payload[total - 200_000..]
+        );
     }
 }
