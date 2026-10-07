@@ -112,6 +112,107 @@ struct MediaMeta {
 struct SeekEmulation {
     max_bytes: u64,
     mode: tokio::sync::Mutex<SeekMode>,
+    /// The origin connection left over from the last request, still positioned inside the file.
+    /// A later request at or past that position reads on from it instead of starting over.
+    parked: Mutex<Option<UpstreamStream>>,
+    /// Requests currently streaming; one of them is about to park its connection.
+    active: AtomicUsize,
+}
+
+impl SeekEmulation {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            max_bytes,
+            mode: tokio::sync::Mutex::new(SeekMode::Unknown),
+            parked: Mutex::new(None),
+            active: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// How long a parked connection is trusted: origins close idle connections after a while.
+const PARKED_UPSTREAM_TTL: Duration = Duration::from_secs(90);
+/// How long a new request waits for a request that is just finishing to hand its connection back.
+const PARKED_UPSTREAM_GRACE: Duration = Duration::from_millis(250);
+
+/// An origin response read front to back. `pos` is the file offset of the next byte to come out
+/// (the start of `leftover` when that is not empty).
+struct UpstreamStream {
+    res: reqwest::Response,
+    pos: u64,
+    leftover: Vec<u8>,
+    /// The origin failed or ended early, so this connection must not be reused.
+    broken: bool,
+    parked_at: Instant,
+}
+
+impl UpstreamStream {
+    fn new(res: reqwest::Response) -> Self {
+        Self {
+            res,
+            pos: 0,
+            leftover: Vec::new(),
+            broken: false,
+            parked_at: Instant::now(),
+        }
+    }
+}
+
+struct ActiveRequest<'a>(&'a AtomicUsize);
+
+impl<'a> ActiveRequest<'a> {
+    fn begin(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for ActiveRequest<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Takes the parked origin connection if it can serve offset `start` (it has not read past it).
+fn take_parked(seek: &SeekEmulation, start: u64) -> Option<UpstreamStream> {
+    let mut slot = seek.parked.lock().ok()?;
+    match slot.as_ref() {
+        Some(up) if up.parked_at.elapsed() > PARKED_UPSTREAM_TTL => {
+            *slot = None;
+            None
+        }
+        Some(up) if up.pos <= start => slot.take(),
+        _ => None,
+    }
+}
+
+async fn take_upstream(seek: &SeekEmulation, start: u64) -> Option<UpstreamStream> {
+    if let Some(up) = take_parked(seek, start) {
+        return Some(up);
+    }
+    // The player closes the connection it is leaving and immediately opens the next one, so the
+    // previous request may still be handing its connection back.
+    let deadline = Instant::now() + PARKED_UPSTREAM_GRACE;
+    while seek.active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if let Some(up) = take_parked(seek, start) {
+            return Some(up);
+        }
+    }
+    None
+}
+
+/// Keeps `up` for the next request. The most recent connection wins: a request means the player
+/// is now reading there, so an older connection is the less likely to be wanted next. A finished
+/// or failed connection is useless.
+fn park_upstream(seek: &SeekEmulation, mut up: UpstreamStream, total: u64) {
+    if up.broken || up.pos >= total {
+        return;
+    }
+    up.parked_at = Instant::now();
+    if let Ok(mut slot) = seek.parked.lock() {
+        *slot = Some(up);
+    }
 }
 
 #[derive(Clone)]
@@ -273,12 +374,7 @@ pub async fn run_sidecar(
         manifest_cache: Arc::new(Mutex::new(None)),
         seek: seek_limit
             .filter(|_| !crate::player::is_dash_url(&target_url))
-            .map(|max_bytes| {
-                Arc::new(SeekEmulation {
-                    max_bytes,
-                    mode: tokio::sync::Mutex::new(SeekMode::Unknown),
-                })
-            }),
+            .map(|max_bytes| Arc::new(SeekEmulation::new(max_bytes))),
     };
 
     if crate::player::is_dash_url(&target_url) {
@@ -704,35 +800,73 @@ fn resolve_range(header: Option<&str>, total: u64) -> Result<(u64, u64), ()> {
     Ok((start, end))
 }
 
-/// Streams bytes `start..start + length` of `res` (a response that begins at byte 0) to the
-/// player, discarding everything before `start`. `sent` counts body bytes written.
-async fn pump_range<W: AsyncWriteExt + Unpin>(
+/// Writes the part of `chunk` (the next bytes of the file, starting at `up.pos`) that falls in
+/// `start + sent..start + length`, and keeps whatever is left over for the next request.
+async fn consume_chunk<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
-    res: reqwest::Response,
+    up: &mut UpstreamStream,
+    chunk: &[u8],
     start: u64,
     length: u64,
     sent: &mut u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut stream = res.bytes_stream();
-    let mut to_skip = start;
+    let chunk_start = up.pos;
+    up.pos += chunk.len() as u64;
+    let target = start + *sent;
+    let mut data = chunk;
+    if chunk_start < target {
+        let skip = ((target - chunk_start) as usize).min(data.len());
+        data = &data[skip..];
+    }
+    let want = length - *sent;
+    if data.len() as u64 > want {
+        let (head, rest) = data.split_at(want as usize);
+        up.leftover = rest.to_vec();
+        up.pos -= rest.len() as u64;
+        data = head;
+    }
+    if !data.is_empty() {
+        writer.write_all(data).await?;
+        writer.flush().await?;
+        *sent += data.len() as u64;
+    }
+    Ok(())
+}
+
+/// Streams bytes `start..start + length` of the file to the player. `up` must not have read
+/// past `start`; everything before it is discarded. `sent` counts body bytes written.
+async fn pump_range<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    up: &mut UpstreamStream,
+    start: u64,
+    length: u64,
+    sent: &mut u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     while *sent < length {
-        let chunk =
-            tokio::time::timeout(Duration::from_secs(CHUNK_IDLE_TIMEOUT_SECS), stream.next())
-                .await
-                .map_err(|_| "upstream idle")?
-                .ok_or("upstream ended early")??;
-        let mut chunk: &[u8] = &chunk;
-        if to_skip > 0 {
-            let skipped = to_skip.min(chunk.len() as u64);
-            chunk = &chunk[skipped as usize..];
-            to_skip -= skipped;
+        if !up.leftover.is_empty() {
+            let chunk = std::mem::take(&mut up.leftover);
+            consume_chunk(writer, up, &chunk, start, length, sent).await?;
+            continue;
         }
-        let take = (chunk.len() as u64).min(length - *sent) as usize;
-        if take > 0 {
-            writer.write_all(&chunk[..take]).await?;
-            writer.flush().await?;
-            *sent += take as u64;
-        }
+        let next =
+            tokio::time::timeout(Duration::from_secs(CHUNK_IDLE_TIMEOUT_SECS), up.res.chunk())
+                .await;
+        let chunk = match next {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => {
+                up.broken = true;
+                return Err("upstream ended early".into());
+            }
+            Ok(Err(error)) => {
+                up.broken = true;
+                return Err(error.into());
+            }
+            Err(_) => {
+                up.broken = true;
+                return Err("upstream idle".into());
+            }
+        };
+        consume_chunk(writer, up, &chunk, start, length, sent).await?;
     }
     Ok(())
 }
@@ -791,7 +925,7 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
         };
         if matches!(*mode, SeekMode::Emulate(_)) {
             // A plain 200 starts at byte 0 whatever range was asked, so it can be reused.
-            upstream = Some(res);
+            upstream = Some(UpstreamStream::new(res));
         }
     }
     let meta = match &*mode {
@@ -832,20 +966,38 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
     writer.flush().await?;
 
     // A far seek can spend a long time skipping, so one dropped connection is retried as long
-    // as the player has not received any body bytes yet.
+    // as the player has not received any body bytes yet. A connection left by an earlier
+    // request is reused when it has not read past the target, so a forward seek only skips the
+    // gap; the connection is parked again afterwards for the next seek.
     let mut upstream = upstream;
     let mut sent = 0u64;
     for attempt in 0..2 {
-        let res = match upstream.take() {
-            Some(res) => res,
-            None => open(None).await?,
+        let mut up = match upstream.take() {
+            Some(up) => up,
+            None => match if attempt == 0 {
+                take_upstream(seek, start).await
+            } else {
+                None
+            } {
+                Some(up) => up,
+                None => UpstreamStream::new(open(None).await?),
+            },
         };
-        match pump_range(writer, res, start, length, &mut sent).await {
-            Ok(()) => break,
-            Err(error) if sent == 0 && attempt == 0 => {
+        let _active = ActiveRequest::begin(&seek.active);
+        match pump_range(writer, &mut up, start, length, &mut sent).await {
+            Ok(()) => {
+                park_upstream(seek, up, meta.total);
+                break;
+            }
+            Err(error) if up.broken && sent == 0 && attempt == 0 => {
                 log::warn!("seek emulation: upstream dropped while skipping, retrying: {error}");
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // The player leaving mid-stream is the normal end of a seek; the origin side
+                // is still positioned and can be parked.
+                park_upstream(seek, up, meta.total);
+                return Err(error);
+            }
         }
     }
     Ok(Some(!client_close))
@@ -1748,12 +1900,7 @@ mod tests {
             max_height: None,
             segment_cache: Arc::new(SegmentCache::default()),
             manifest_cache: Arc::new(Mutex::new(None)),
-            seek: seek_limit.map(|max_bytes| {
-                Arc::new(SeekEmulation {
-                    max_bytes,
-                    mode: tokio::sync::Mutex::new(SeekMode::Unknown),
-                })
-            }),
+            seek: seek_limit.map(|max_bytes| Arc::new(SeekEmulation::new(max_bytes))),
         };
         tokio::spawn(async move {
             loop {
@@ -1771,6 +1918,97 @@ mod tests {
 
     fn sample_payload() -> Arc<Vec<u8>> {
         Arc::new((0..300_000u32).map(|i| (i % 251) as u8).collect())
+    }
+
+    /// A host that ignores `Range` and counts the connections it accepts.
+    async fn spawn_counting_origin(
+        payload: Arc<Vec<u8>>,
+        connections: Arc<AtomicUsize>,
+    ) -> std::net::SocketAddr {
+        use tokio::io::AsyncReadExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                connections.fetch_add(1, Ordering::SeqCst);
+                let data = Arc::clone(&payload);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    if socket.read(&mut buf).await.is_err() {
+                        return;
+                    }
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: video/x-matroska\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        data.len()
+                    );
+                    if socket.write_all(hdr.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    for chunk in data.chunks(64 * 1024) {
+                        if socket.write_all(chunk).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn forward_seeks_reuse_the_origin_connection() {
+        let payload: Arc<Vec<u8>> = Arc::new((0..8_000_000u32).map(|i| (i % 251) as u8).collect());
+        let connections = Arc::new(AtomicUsize::new(0));
+        let origin = spawn_counting_origin(Arc::clone(&payload), Arc::clone(&connections)).await;
+        let port = spawn_proxy(origin, Some(DEFAULT_SEEK_EMULATION_MAX_BYTES)).await;
+        let url = format!("http://127.0.0.1:{port}/http/{origin}/movie");
+        // A fresh client per request: the player closes its connection on every seek.
+        let fetch = |range: &'static str| {
+            let url = url.clone();
+            async move {
+                let client = reqwest::Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .build()
+                    .unwrap();
+                let res = client
+                    .get(&url)
+                    .header("Range", range)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(res.status(), 206, "{range}");
+                res.bytes().await.unwrap()
+            }
+        };
+
+        assert_eq!(fetch("bytes=100-1099").await.as_ref(), &payload[100..1100]);
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        // Forward: continues on the same origin connection.
+        assert_eq!(
+            fetch("bytes=3000000-3000999").await.as_ref(),
+            &payload[3_000_000..3_001_000]
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fetch("bytes=6000000-6000999").await.as_ref(),
+            &payload[6_000_000..6_001_000]
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        // Backward: the parked connection is already past it, so a new one is opened.
+        assert_eq!(
+            fetch("bytes=1000-1999").await.as_ref(),
+            &payload[1000..2000]
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        // And that new connection is the one that gets reused from here on.
+        assert_eq!(
+            fetch("bytes=2000000-2000999").await.as_ref(),
+            &payload[2_000_000..2_001_000]
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
