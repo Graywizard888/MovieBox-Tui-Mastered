@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- The default `MOVIEBOX_SEEK_PROXY_MAX_MB` is now 3000 (was 5000 in 1.0.1), so files up to about 2.9 GB seek through the proxy. Larger files are still played as-is.
+
 ## [1.0.1] - 2026-10-07
 
 ### Changed

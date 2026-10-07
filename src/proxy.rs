@@ -21,7 +21,7 @@ const PREFETCH_LOOKAHEAD: u32 = 3;
 /// Largest file the proxy will fake range support for. Faking a seek means downloading and
 /// discarding every byte before the target, and players often probe the end of the file at
 /// startup (MKV cues), so the cost grows with the file size.
-pub const DEFAULT_SEEK_EMULATION_MAX_BYTES: u64 = 5000 * 1024 * 1024;
+pub const DEFAULT_SEEK_EMULATION_MAX_BYTES: u64 = 3000 * 1024 * 1024;
 
 /// Size limit for seek emulation from `MOVIEBOX_SEEK_PROXY_MAX_MB`; `0` turns it off.
 pub fn seek_emulation_limit() -> Option<u64> {
