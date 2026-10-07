@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="MovieBox-Tui"
+APP_NAME="MovieBox-Tui-Mastered"
 BIN_NAME="moviebox-tui"
 REPO="Graywizard888/MovieBox-Tui-Mastered"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
