@@ -14,7 +14,6 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo check --all-targets --all-features --locked
 cargo test --all-features --locked
 cargo audit
-cargo package --locked
 ```
 
 Confirm the entire unit and integration test suite passes on the CI host matrix
@@ -30,11 +29,6 @@ Confirm the main GitHub Actions workflows are green:
 
 - `CI`
 - `Release`
-- `Publish to Crates.io` when applicable
-- `Update Homebrew Formula` when applicable
-
-If you manually dispatch `Publish to Crates.io` or `Update Homebrew Formula`,
-run them against the explicit release tag, not a branch head.
 
 ## 2. Desktop playback checks
 
@@ -100,13 +94,12 @@ Verify the published release contains:
 
 - expected archives for macOS, Linux x64, Linux arm64, Android arm64, Windows x64, and Windows arm64
 - `SHA256SUMS`
-- working install scripts / formula references
+- working install scripts
 
 Spot-check:
 
 - `install.sh`
 - `install.ps1`
-- Homebrew formula install path
 
 ## Exit criteria
 
