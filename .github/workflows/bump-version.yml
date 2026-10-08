@@ -1,0 +1,107 @@
+name: Bump Version
+
+# Run from the Actions tab: sets the version in Cargo.toml and Cargo.lock, dates the
+# CHANGELOG heading, commits to main, then starts the Release workflow for that commit.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version without the leading v (e.g. 1.0.6)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump to ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Push the version commit and dispatch the Release workflow.
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+
+      - name: Validate requested version
+        id: validate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW: ${{ inputs.version }}
+        run: |
+          NEW="${NEW#v}"
+          if ! [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$NEW' is not a MAJOR.MINOR.PATCH version"; exit 1
+          fi
+          CURRENT=$(grep '^version =' Cargo.toml | head -1 | awk -F'"' '{print $2}')
+          if [ "$NEW" = "$CURRENT" ]; then
+            echo "::error::Cargo.toml is already at $CURRENT"; exit 1
+          fi
+          if [ "$(printf '%s\n%s\n' "$CURRENT" "$NEW" | sort -V | tail -1)" != "$NEW" ]; then
+            echo "::error::$NEW is lower than the current version $CURRENT"; exit 1
+          fi
+          if gh release view "v$NEW" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "::error::Release v$NEW already exists"; exit 1
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+
+      - name: Update Cargo.toml and Cargo.lock
+        env:
+          NEW: ${{ steps.validate.outputs.new }}
+        run: |
+          # Only the first `version =` line is the package version.
+          sed -i "0,/^version = \".*\"/s//version = \"$NEW\"/" Cargo.toml
+          # Rewrites only this crate's entry in Cargo.lock; dependencies stay pinned.
+          cargo update -p moviebox-tui
+          git diff --stat
+          CHANGED=$(git diff --numstat -- Cargo.lock | awk '{print $1}')
+          if [ "$CHANGED" != "1" ]; then
+            echo "::error::Cargo.lock changed more than the moviebox-tui version line"; git diff -- Cargo.lock; exit 1
+          fi
+
+      - name: Date the CHANGELOG heading
+        env:
+          NEW: ${{ steps.validate.outputs.new }}
+        run: |
+          TODAY=$(date -u +%F)
+          if grep -q "^## \[$NEW\]" CHANGELOG.md; then
+            # Heading already written by hand; add the date if it has none.
+            sed -i "s/^## \[$NEW\][[:space:]]*$/## [$NEW] - $TODAY/" CHANGELOG.md
+          elif grep -q '^## \[Unreleased\]' CHANGELOG.md; then
+            # Unreleased notes become this version's notes; a fresh empty Unreleased stays on top.
+            sed -i "0,/^## \[Unreleased\].*/s//## [Unreleased]\n\n## [$NEW] - $TODAY/" CHANGELOG.md
+          else
+            echo "::warning::No CHANGELOG heading for $NEW or Unreleased; the release will use generated notes."
+          fi
+          sed -n '1,12p' CHANGELOG.md
+
+      - name: Commit and push
+        env:
+          NEW: ${{ steps.validate.outputs.new }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore: release v$NEW"
+          git push origin "HEAD:$BRANCH"
+
+      # A push made with GITHUB_TOKEN does not start other workflows, but a dispatch does.
+      - name: Start the Release workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run release.yml --repo "${{ github.repository }}" --ref "$BRANCH" -f build_only=false
