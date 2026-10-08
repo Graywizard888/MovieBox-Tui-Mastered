@@ -51,8 +51,6 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
-      - name: Verify package
-        run: cargo package --locked
       - name: Verify documentation build
         uses: taiki-e/install-action@v2
         with:

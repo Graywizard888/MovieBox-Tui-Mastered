@@ -44,25 +44,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUILD_ONLY: ${{ inputs.build_only }}
 
-  preflight:
-    name: Release preflight
-    needs: check-version
-    if: needs.check-version.outputs.is_new == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.90.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "release-preflight"
-      - run: cargo package --locked
-
   build:
     name: Build ${{ matrix.target }}
-    needs: [check-version, preflight]
+    needs: check-version
     if: needs.check-version.outputs.is_new == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -220,7 +204,7 @@ jobs:
 
   build-android:
     name: Build Android (aarch64-linux-android)
-    needs: [check-version, preflight]
+    needs: check-version
     if: needs.check-version.outputs.is_new == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30

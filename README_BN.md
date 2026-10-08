@@ -6,8 +6,8 @@
 
 [ English ](README.md) • [ বাংলা ](README_BN.md) • [ हिन्दी ](README_HI.md) • [ Español ](README_ES.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/mesamirh/MovieBox-Tui/ci.yml?branch=main&label=CI&logo=github&style=flat)](https://github.com/mesamirh/MovieBox-Tui/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/moviebox-tui.svg?logo=rust&style=flat)](https://crates.io/crates/moviebox-tui)
+[![CI](https://img.shields.io/github/actions/workflow/status/Graywizard888/MovieBox-Tui-Mastered/ci.yml?branch=main&label=CI&logo=github&style=flat)](https://github.com/Graywizard888/MovieBox-Tui-Mastered/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Graywizard888/MovieBox-Tui-Mastered?label=release&logo=github&style=flat)](https://github.com/Graywizard888/MovieBox-Tui-Mastered/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg?style=flat)](#license)
 [![Telegram](https://img.shields.io/badge/Telegram-Channel-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/getfromme)
 [![Support](https://img.shields.io/badge/Support-Crypto-F7931A?style=flat&logo=bitcoin&logoColor=white)](#optional-support)
@@ -37,30 +37,16 @@
 
 ### macOS ও Linux
 
-আপনার সিস্টেমে [Homebrew](https://brew.sh/) থাকলে (macOS):
-```bash
-brew tap mesamirh/moviebox-tui https://github.com/mesamirh/MovieBox-Tui
-brew install moviebox-tui
-```
-
-> **নোট:** প্রথমবার ইনস্টলের সময় Homebrew যদি ট্যাপ ভেরিফিকেশন চায়, তবে `brew trust mesamirh/moviebox-tui` রান করুন।
-
 সরাসরি টার্মিনাল দিয়ে ইনস্টল (macOS ও Linux, কোনো প্যাকেজ ম্যানেজার লাগবে না):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.sh | bash
 ```
 
 ### Windows
 
-আপনার সিস্টেমে [Scoop](https://scoop.sh/) থাকলে (সুপারিশকৃত):
-```powershell
-scoop bucket add moviebox https://github.com/mesamirh/MovieBox-Tui
-scoop install moviebox-tui
-```
-
 PowerShell স্ক্রিপ্ট দিয়ে সরাসরি ইনস্টল (কোনো প্যাকেজ ম্যানেজার লাগবে না):
 ```powershell
-irm https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.ps1 | iex
 ```
 
 > **SmartScreen প্রম্পট:** Windows যদি *"Windows protected your PC"* দেখায়, তবে **More info** → **Run anyway** এ ক্লিক করুন।
@@ -70,7 +56,7 @@ irm https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.ps1 | i
 Termux ওপেন করে রান করুন:
 ```bash
 pkg update && pkg install -y curl tar termux-tools termux-am
-curl -fsSL https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.sh | bash
 termux-setup-storage
 ```
 > [!IMPORTANT]
@@ -79,15 +65,15 @@ termux-setup-storage
 <details>
 <summary><b>Cargo ও সোর্স কোড থেকে বিল্ড</b></summary>
 
-crates.io থেকে ইনস্টল:
+Git থেকে:
 ```bash
-cargo install moviebox-tui --locked
+cargo install --git https://github.com/Graywizard888/MovieBox-Tui-Mastered --locked
 ```
 
 সোর্স কোড থেকে কম্পাইল:
 ```bash
-git clone https://github.com/mesamirh/MovieBox-Tui.git
-cd MovieBox-Tui
+git clone https://github.com/Graywizard888/MovieBox-Tui-Mastered.git
+cd MovieBox-Tui-Mastered
 cargo build --release --locked
 ```
 
@@ -98,7 +84,7 @@ cargo build --release --locked
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify <archive-file> -R mesamirh/MovieBox-Tui
+gh attestation verify <archive-file> -R Graywizard888/MovieBox-Tui-Mastered
 ```
 
 </details>
@@ -110,8 +96,6 @@ gh attestation verify <archive-file> -R mesamirh/MovieBox-Tui
 
 অথবা প্যাকেজ ম্যানেজারের মাধ্যমে:
 ```bash
-brew uninstall moviebox-tui     # Homebrew
-scoop uninstall moviebox-tui    # Scoop
 cargo uninstall moviebox-tui    # Cargo
 ```
 
@@ -128,7 +112,7 @@ moviebox-tui
 
 ## ডকুমেন্টেশন
 
-বিস্তারিত গাইড ও আর্কিটেকচার সম্পর্কে জানতে ভিজিট করুন [**mesamirh.github.io/MovieBox-Tui**](https://mesamirh.github.io/MovieBox-Tui/) অথবা প্রজেক্টের [`docs/`](docs/) ডিরেক্টরি দেখুন:
+বিস্তারিত গাইড ও আর্কিটেকচার সম্পর্কে জানতে ভিজিট করুন [**GitHub**](https://github.com/Graywizard888/MovieBox-Tui-Mastered/tree/main/docs) অথবা প্রজেক্টের [`docs/`](docs/) ডিরেক্টরি দেখুন:
 
 | গাইড | বিবরণ |
 | :--- | :--- |
@@ -144,7 +128,7 @@ moviebox-tui
 
 প্রজেক্টে যেকোনো ধরনের অবদান সাদরে আমন্ত্রিত। পুল রিকোয়েস্ট পাঠানোর আগে [CONTRIBUTING.md](CONTRIBUTING.md) গাইডলাইনটি দেখে নিন।
 
-কোনো বাগ রিপোর্ট করতে বা নতুন ফিচারের অনুরোধ জানাতে [GitHub Issues](https://github.com/mesamirh/MovieBox-Tui/issues) ব্যবহার করুন।
+কোনো বাগ রিপোর্ট করতে বা নতুন ফিচারের অনুরোধ জানাতে [GitHub Issues](https://github.com/Graywizard888/MovieBox-Tui-Mastered/issues) ব্যবহার করুন।
 
 <details>
 <summary><b>ঐচ্ছিক সহায়তা (Optional Support)</b></summary>

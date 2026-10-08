@@ -6,45 +6,24 @@ MovieBox-TUI is available across macOS, Linux, Windows, and Android (Termux).
 
 ## macOS and Linux
 
-### Homebrew (macOS)
-
-If you have [Homebrew](https://brew.sh/):
-
-```bash
-brew tap mesamirh/moviebox-tui https://github.com/mesamirh/MovieBox-Tui
-brew install moviebox-tui
-```
-
-> [!NOTE]
-> If Homebrew prompts for tap verification on initial install, run `brew trust mesamirh/moviebox-tui`.
-
 ### Direct Terminal Script
 
 No package manager required. Open Terminal and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.sh | bash
 ```
 
 ---
 
 ## Windows
 
-### Scoop Package Manager (Recommended)
-
-If you have [Scoop](https://scoop.sh/):
-
-```powershell
-scoop bucket add moviebox https://github.com/mesamirh/MovieBox-Tui
-scoop install moviebox-tui
-```
-
 ### Direct PowerShell Script
 
 No package manager required. Open **PowerShell** and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.ps1 | iex
 ```
 
 > **SmartScreen prompt:** If Windows displays *"Windows protected your PC"*, click **More info** → **Run anyway**.
@@ -56,7 +35,7 @@ Open Termux and run:
 
 ```bash
 pkg update && pkg install -y curl tar termux-tools termux-am
-curl -fsSL https://raw.githubusercontent.com/mesamirh/MovieBox-Tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Graywizard888/MovieBox-Tui-Mastered/main/install.sh | bash
 termux-setup-storage
 ```
 
@@ -64,12 +43,12 @@ termux-setup-storage
 > Video playback on Android launches through your installed external media player (such as VLC, Just Player, or MX Player).
 ---
 
-## Cargo (Crates.io)
+## Cargo (from Git)
 
-Install directly using Cargo:
+Install directly from the repository using Cargo:
 
 ```bash
-cargo install moviebox-tui --locked
+cargo install --git https://github.com/Graywizard888/MovieBox-Tui-Mastered --locked
 ```
 
 ---
@@ -79,8 +58,8 @@ cargo install moviebox-tui --locked
 Clone the repository and build the release binary:
 
 ```bash
-git clone https://github.com/mesamirh/MovieBox-Tui.git
-cd MovieBox-Tui
+git clone https://github.com/Graywizard888/MovieBox-Tui-Mastered.git
+cd MovieBox-Tui-Mastered
 cargo build --release --locked
 ```
 
@@ -94,7 +73,7 @@ All release assets include cryptographically signed SHA-256 checksums and GitHub
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify <archive-file> -R mesamirh/MovieBox-Tui
+gh attestation verify <archive-file> -R Graywizard888/MovieBox-Tui-Mastered
 ```
 ---
 
@@ -114,10 +93,8 @@ What would you like to do?
 
 Enter `2` to completely remove MovieBox-TUI from your system.
 
-### Package Managers
+### Cargo
 
 ```bash
-brew uninstall moviebox-tui     # Homebrew (macOS)
-scoop uninstall moviebox-tui    # Scoop (Windows)
-cargo uninstall moviebox-tui    # Cargo
+cargo uninstall moviebox-tui
 ```
