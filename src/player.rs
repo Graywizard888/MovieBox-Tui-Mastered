@@ -1425,7 +1425,7 @@ fn flatpak_executable(app_id: &str) -> Option<String> {
 }
 
 fn configured_executable(variable: &str) -> Option<String> {
-    let raw = std::env::var(variable).ok().or_else(|| {
+    let raw = crate::env_vars::var(variable).ok().or_else(|| {
         let cfg = crate::config::load();
         match variable {
             "MOVIEBOX_VLC_PATH" => cfg.vlc_path,

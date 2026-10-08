@@ -216,6 +216,8 @@ impl App {
             if let Some(clicked_row) = crate::tui::widgets::settings::settings_row_at(
                 popup,
                 self.state.settings_category,
+                self.state.settings_scroll.get(),
+                self.state.settings_selected_row,
                 col,
                 row,
             ) {

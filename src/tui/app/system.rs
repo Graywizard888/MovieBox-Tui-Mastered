@@ -406,10 +406,21 @@ impl App {
                         self.state.dirty = true;
                     }
                 }
-                crate::tui::state::SettingsCategory::StorageInfo => {}
+                crate::tui::state::SettingsCategory::StorageInfo
+                | crate::tui::state::SettingsCategory::EnvVars => {}
             },
 
             Action::SettingsActivateRow => match self.state.settings_category {
+                crate::tui::state::SettingsCategory::EnvVars => {
+                    let row = self.state.settings_selected_row;
+                    if let Some(input) = self.state.settings_text_input.take() {
+                        self.save_env_var(row, input);
+                    } else if let Some(spec) = crate::env_vars::SPECS.get(row) {
+                        let current = crate::env_vars::saved(spec.name).unwrap_or_default();
+                        self.state.settings_text_input =
+                            Some(crate::tui::text::TextInputBuffer::from_str(&current));
+                    }
+                }
                 crate::tui::state::SettingsCategory::General => {
                     match self.state.settings_selected_row {
                         0 => {
@@ -1016,6 +1027,52 @@ impl App {
                 ),
             },
         }
+    }
+
+    fn save_env_var(&mut self, row: usize, input: crate::tui::text::TextInputBuffer) {
+        let Some(spec) = crate::env_vars::SPECS.get(row) else {
+            return;
+        };
+        match crate::env_vars::normalize(spec, input.as_str()) {
+            Err(message) => {
+                // Keep what was typed so it can be fixed.
+                self.state.settings_text_input = Some(input);
+                self.state
+                    .notify(NotificationKind::Error, "Env Variables", message);
+            }
+            Ok(value) => self.store_env_var(spec, value.as_deref()),
+        }
+    }
+
+    pub(super) fn clear_env_var(&mut self, row: usize) {
+        if let Some(spec) = crate::env_vars::SPECS.get(row) {
+            self.store_env_var(spec, None);
+        }
+    }
+
+    fn store_env_var(&mut self, spec: &crate::env_vars::Spec, value: Option<&str>) {
+        if let Err(error) = crate::env_vars::save(spec.name, value) {
+            self.state.notify(
+                NotificationKind::Error,
+                "Env Variables",
+                format!("Could not save {}: {error}", spec.name),
+            );
+            return;
+        }
+        let when = match spec.applies {
+            crate::env_vars::Applies::Now => "now",
+            crate::env_vars::Applies::Restart => "after a restart",
+        };
+        let message = match (value, crate::env_vars::shell(spec.name).is_some()) {
+            (_, true) => format!(
+                "Saved, but {} is set in your shell, which wins for this run.",
+                spec.name
+            ),
+            (Some(value), false) => format!("{} = {value}, applies {when}.", spec.name),
+            (None, false) => format!("{} back to default, applies {when}.", spec.name),
+        };
+        self.state
+            .notify(NotificationKind::Success, "Env Variables", message);
     }
 
     pub(super) fn clear_toonworld_cookie(&mut self) {

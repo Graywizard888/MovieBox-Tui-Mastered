@@ -23,7 +23,7 @@ pub struct UhdMoviesClient {
 
 impl UhdMoviesClient {
     pub fn new() -> Result<Self, ProviderError> {
-        let override_url = std::env::var("MOVIEBOX_UHDMOVIES_URL").ok();
+        let override_url = crate::env_vars::var("MOVIEBOX_UHDMOVIES_URL").ok();
         let mut client = Self::with_base_url(override_url.as_deref().unwrap_or(DEFAULT_BASE_URL))?;
         if override_url.is_none() {
             client.domain = site::DomainSource::discovering(
@@ -32,7 +32,7 @@ impl UhdMoviesClient {
                 "UHDMovies",
             );
         }
-        if let Ok(previous) = std::env::var("MOVIEBOX_UHDMOVIES_PREVIOUS_URL") {
+        if let Ok(previous) = crate::env_vars::var("MOVIEBOX_UHDMOVIES_PREVIOUS_URL") {
             client.previous_domains.push(site::base_url(&previous)?);
         }
         Ok(client)

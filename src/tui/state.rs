@@ -72,14 +72,16 @@ pub enum SettingsCategory {
     ContentModes,
     Appearance,
     StorageInfo,
+    EnvVars,
 }
 
 impl SettingsCategory {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::General,
         Self::ContentModes,
         Self::Appearance,
         Self::StorageInfo,
+        Self::EnvVars,
     ];
 
     pub fn title(self) -> &'static str {
@@ -88,6 +90,7 @@ impl SettingsCategory {
             Self::ContentModes => "Content Modes",
             Self::Appearance => "Appearance",
             Self::StorageInfo => "Maintenance",
+            Self::EnvVars => "Env Variables",
         }
     }
     pub fn compact_title(self) -> &'static str {
@@ -96,6 +99,7 @@ impl SettingsCategory {
             Self::ContentModes => "2:Modes",
             Self::Appearance => "3:Theme",
             Self::StorageInfo => "4:Info",
+            Self::EnvVars => "5:Env",
         }
     }
 
@@ -105,6 +109,7 @@ impl SettingsCategory {
             Self::ContentModes => "MODES",
             Self::Appearance => "THEME",
             Self::StorageInfo => "MAINT",
+            Self::EnvVars => "ENV",
         }
     }
 
@@ -114,6 +119,15 @@ impl SettingsCategory {
             Self::ContentModes => 3,
             Self::Appearance => 1,
             Self::StorageInfo => 5,
+            Self::EnvVars => crate::env_vars::SPECS.len(),
+        }
+    }
+
+    /// Lines under the rows (the Env Variables help text).
+    pub fn footer_height(self) -> usize {
+        match self {
+            Self::EnvVars => 2,
+            _ => 0,
         }
     }
     pub fn next(self) -> Self {
@@ -121,16 +135,18 @@ impl SettingsCategory {
             Self::General => Self::ContentModes,
             Self::ContentModes => Self::Appearance,
             Self::Appearance => Self::StorageInfo,
-            Self::StorageInfo => Self::General,
+            Self::StorageInfo => Self::EnvVars,
+            Self::EnvVars => Self::General,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            Self::General => Self::StorageInfo,
+            Self::General => Self::EnvVars,
             Self::ContentModes => Self::General,
             Self::Appearance => Self::ContentModes,
             Self::StorageInfo => Self::Appearance,
+            Self::EnvVars => Self::StorageInfo,
         }
     }
 }
@@ -395,6 +411,8 @@ pub struct AppState {
     pub settings_category: SettingsCategory,
     pub settings_selected_row: usize,
     pub settings_text_input: Option<crate::tui::text::TextInputBuffer>,
+    /// First visible row of a settings tab taller than the modal; kept by the draw pass.
+    pub settings_scroll: std::cell::Cell<usize>,
     pub show_sources_popup: bool,
     pub sources_list_state: ListState,
 
@@ -582,6 +600,7 @@ impl Default for AppState {
             settings_category: SettingsCategory::General,
             settings_selected_row: 0,
             settings_text_input: None,
+            settings_scroll: std::cell::Cell::new(0),
             show_sources_popup: false,
             sources_list_state: ListState::default(),
 

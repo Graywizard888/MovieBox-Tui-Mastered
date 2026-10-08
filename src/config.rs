@@ -122,7 +122,7 @@ pub fn data_dir() -> Option<PathBuf> {
     if let Some(sandbox) = TEST_SANDBOX_DIR.as_ref() {
         return Some(sandbox.join("data").join(APP_NAME));
     }
-    if let Ok(dir) = std::env::var("MOVIEBOX_DATA_DIR") {
+    if let Ok(dir) = crate::env_vars::var("MOVIEBOX_DATA_DIR") {
         return Some(PathBuf::from(dir));
     }
     if let Some(sandbox) = TEST_SANDBOX_DIR.as_ref() {
@@ -158,7 +158,7 @@ pub fn cache_dir() -> PathBuf {
     if let Some(sandbox) = TEST_SANDBOX_DIR.as_ref() {
         return sandbox.join("cache").join(APP_NAME);
     }
-    if let Ok(dir) = std::env::var("MOVIEBOX_CACHE_DIR") {
+    if let Ok(dir) = crate::env_vars::var("MOVIEBOX_CACHE_DIR") {
         return PathBuf::from(dir);
     }
     if let Some(sandbox) = TEST_SANDBOX_DIR.as_ref() {

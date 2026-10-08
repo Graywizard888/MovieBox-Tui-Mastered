@@ -66,6 +66,8 @@ impl Drop for TerminalGuard {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Before anything reads a MOVIEBOX_* variable, including the seek-proxy sidecar.
+    moviebox_tui::env_vars::load();
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|a| a == "--proxy-for-vlc") {
         let target_url = args.get(pos + 1).cloned().unwrap_or_default();

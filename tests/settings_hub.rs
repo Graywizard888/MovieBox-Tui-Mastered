@@ -201,31 +201,61 @@ async fn test_settings_mouse_tab_and_row_clicks() {
         settings_category_tab_at(popup, 52, popup.y + 1, false, SettingsCategory::General);
     assert_eq!(cat_maint, Some(SettingsCategory::StorageInfo));
 
-    let rows = settings_row_rects(popup, SettingsCategory::General);
+    let (_, rows) = settings_row_rects(popup, SettingsCategory::General, 0, 0);
     assert_eq!(rows.len(), 4);
     assert_eq!(
-        settings_row_at(popup, SettingsCategory::General, rows[0].x + 2, rows[0].y),
+        settings_row_at(
+            popup,
+            SettingsCategory::General,
+            0,
+            0,
+            rows[0].x + 2,
+            rows[0].y
+        ),
         Some(0)
     );
     assert_eq!(
         settings_row_at(
             popup,
             SettingsCategory::General,
+            0,
+            0,
             rows[0].x + 2,
             rows[0].y + 1
         ),
         Some(1)
     );
     assert_eq!(
-        settings_row_at(popup, SettingsCategory::General, rows[1].x + 2, rows[1].y),
+        settings_row_at(
+            popup,
+            SettingsCategory::General,
+            0,
+            0,
+            rows[1].x + 2,
+            rows[1].y
+        ),
         Some(1)
     );
     assert_eq!(
-        settings_row_at(popup, SettingsCategory::General, rows[2].x + 2, rows[2].y),
+        settings_row_at(
+            popup,
+            SettingsCategory::General,
+            0,
+            0,
+            rows[2].x + 2,
+            rows[2].y
+        ),
         Some(2)
     );
     assert_eq!(
-        settings_row_at(popup, SettingsCategory::General, rows[3].x + 2, rows[3].y),
+        settings_row_at(
+            popup,
+            SettingsCategory::General,
+            0,
+            0,
+            rows[3].x + 2,
+            rows[3].y
+        ),
         Some(3)
     );
 }

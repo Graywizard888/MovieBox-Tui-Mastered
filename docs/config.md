@@ -41,6 +41,13 @@ Enter `/settings` in the search bar or click `[ ⚙ Settings ]` on the Home scre
 
 ## Environment Variables
 
+Every variable below except `MOVIEBOX_CONFIG_DIR` and `MOVIEBOX_TOONWORLD_COOKIE` (which has its own
+row in General) can also be set in `/settings` → **Env Variables**: Enter edits, `d` clears, and the
+help line says whether a change applies now or after a restart. Values are saved as `NAME=value` lines
+in `env_vars` in the config directory. A value set in the shell or on the command line
+(`MOVIEBOX_SEEK_PROXY_MAX_MB=4000 moviebox-tui`) wins for that run only and is never saved; the next
+launch without it uses the Settings value again, then the built-in default.
+
 | Variable | Description |
 | :--- | :--- |
 | `MOVIEBOX_PLAYER` | Force media player (`"mpv"`, `"vlc"`, `"iina"`, `"android"`) |
