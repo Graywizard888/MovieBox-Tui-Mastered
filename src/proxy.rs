@@ -35,16 +35,6 @@ pub fn seek_emulation_limit() -> Option<u64> {
     }
 }
 
-/// Seek emulation for external Android players (`am start`). Off unless
-/// `MOVIEBOX_SEEK_PROXY_MAX_MB` is set: StreamX (libmpv) exits shortly after opening an
-/// emulated stream, so by default those players get the origin link and play it front to back.
-pub fn android_seek_emulation_limit() -> Option<u64> {
-    std::env::var_os("MOVIEBOX_SEEK_PROXY_MAX_MB")
-        .is_some()
-        .then(seek_emulation_limit)
-        .flatten()
-}
-
 /// Whether the seek proxy would fake ranges for a file of this size. Unknown sizes are tried:
 /// the proxy decides from the origin's answer and relays the file untouched when it is too big.
 pub fn seek_emulation_applies(total: Option<u64>) -> bool {

@@ -63,7 +63,7 @@ Enter `/settings` in the search bar or click `[ ⚙ Settings ]` on the Home scre
 | `MOVIEBOX_TOONWORLD4ALL_WORKER_URL` | Override ToonWorld4All redirect worker base URL (HTTPS) |
 | `MOVIEBOX_TOONWORLD4ALL_PREVIOUS_WORKER_URL` | Rebase worker redirects on an earlier worker origin |
 | `MOVIEBOX_TOONWORLD_COOKIE` | Cookies copied from a browser that already passed the ToonWorld4All archive's 24-hour ad gate (e.g. `user=...`). Sent only to the archive's own redirect pages; never logged. Can also be pasted in Settings (General, ToonWorld Cookie), which keeps it in a private file; the variable wins when both are set. |
-| `MOVIEBOX_SEEK_PROXY_MAX_MB` | Largest file (MB, default `3000`) for which UHDMovies/Moviesmod/ToonWorld4All playback fakes seeking when the host cannot seek (see Players). `0` turns it off. The Android player gets fake seeking only when this is set explicitly. |
+| `MOVIEBOX_SEEK_PROXY_MAX_MB` | Largest file (MB, default `3000`) for which UHDMovies/Moviesmod/ToonWorld4All playback fakes seeking when the host cannot seek (see Players). `0` turns it off. |
 | `MOVIEBOX_SEEK_PROXY_END_WAIT_SECS` | Longest wait (seconds, default `15`) the seek proxy accepts for a Matroska player reading the file index at the end of the file while opening it; a longer one is refused so playback starts at once. A very large value never refuses. |
 | `MOVIEBOX_NO_IMAGE` | Set to `"1"` or `"true"` to disable terminal image previews |
 | `MOVIEBOX_IMAGE_PROTOCOL` | Force image protocol (`"kitty"`, `"sixel"`, `"iterm2"`, or `"off"`) |

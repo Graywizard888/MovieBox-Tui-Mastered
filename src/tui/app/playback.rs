@@ -380,13 +380,7 @@ impl App {
                 !name.eq_ignore_ascii_case("referer") && !name.eq_ignore_ascii_case("user-agent")
             });
             let seek_limit = seek_emulation
-                .then(|| {
-                    if matches!(kind, crate::tui::state::PlayerKind::AndroidIntent) {
-                        crate::proxy::android_seek_emulation_limit()
-                    } else {
-                        crate::proxy::seek_emulation_limit()
-                    }
-                })
+                .then(crate::proxy::seek_emulation_limit)
                 .flatten();
             let needs_proxy = is_dash
                 || seek_limit.is_some()
