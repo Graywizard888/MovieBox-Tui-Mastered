@@ -160,5 +160,6 @@ async fn main() -> std::io::Result<()> {
     if let Err(err) = app.run(&mut terminal).await {
         log::error!("application error: {err}");
     }
+    moviebox_tui::cache::flush_deferred_writes();
     Ok(())
 }

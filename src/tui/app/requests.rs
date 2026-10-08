@@ -5,6 +5,9 @@ use crate::tui::{
     state::{InputMode, Screen, SearchResult},
 };
 
+/// Wait before a preview's network lookup, so only the item the cursor settles on is fetched.
+const PREVIEW_FETCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
 impl App {
     pub(super) async fn handle_requests(&mut self, action: Action) -> Option<()> {
         match action {
@@ -596,12 +599,17 @@ impl App {
             }
 
             Action::FetchPreview(id) => {
+                // Only the latest selection matters: drop the previous lookup so fast
+                // scrolling does not leave one details request per item passed.
+                self.request_tasks.cancel_preview();
                 self.state.active_preview_request =
                     self.state.active_preview_request.wrapping_add(1);
                 let request_id = self.state.active_preview_request;
                 if self.state.is_tv_mode {
                     self.state.preview_loading = false;
-                    if !self.state.image_cache.contains(&id) {
+                    if !self.state.image_cache.contains(&id)
+                        && !self.state.search_posters.contains(&id)
+                    {
                         if let Some(channel) =
                             self.state.tv_channels.iter().find(|c| c.stream_url == id)
                         {
@@ -640,21 +648,21 @@ impl App {
                 }
                 if let Some(cached) = self.state.preview_cache.get(&id).cloned() {
                     self.state.preview_loading = false;
-                    self.state.search_preview = Some(cached.clone());
+                    let cover_url = cached.cover_url().map(str::to_string);
+                    self.state.search_preview = Some(cached);
                     self.state.poster_image = None;
                     self.state.poster_protocol = None;
                     if let Some(img) = self.state.image_cache.get(&id) {
                         self.state.poster_image = Some(std::sync::Arc::clone(img));
                     } else if self.state.image_supported
-                        && let Some(url) = cached.cover_url()
+                        && let Some(url) = cover_url
                     {
-                        let url = url.to_string();
                         let tx = self.action_sender.clone();
                         let id2 = id.clone();
                         let service = self.service.clone();
                         tokio::spawn(async move {
                             if let Some(img) = service
-                                .fetch_and_decode_cached_poster(prov.cache_key(), &id2, &url)
+                                .fetch_and_decode_cached_poster("posters", &id2, &url)
                                 .await
                             {
                                 tx.send(Action::PosterSuccess(id2, img)).ok();
@@ -669,7 +677,7 @@ impl App {
                 let sender = self.action_sender.clone();
                 let id_clone = id.clone();
 
-                tokio::spawn(async move {
+                self.request_tasks.spawn_preview(async move {
                     if let Ok(Some(cached_disk)) = tokio::task::spawn_blocking({
                         let id_clone = id_clone.clone();
                         move || crate::cache::get_provider_details_cache_typed(prov, &id_clone)
@@ -686,16 +694,18 @@ impl App {
                         return;
                     }
 
+                    // Debounce network lookups: a newer selection aborts this task
+                    // during the wait, so held keys and wheel scrolls cost one request.
+                    tokio::time::sleep(PREVIEW_FETCH_DEBOUNCE).await;
                     match service.details_typed(prov, &id_clone).await {
                         Ok(details) => {
                             let id_save = id_clone.clone();
                             let det_save = details.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
+                            tokio::task::spawn_blocking(move || {
                                 crate::cache::set_provider_details_cache_typed(
                                     prov, &id_save, &det_save,
                                 )
-                            })
-                            .await;
+                            });
                             sender
                                 .send(Action::PreviewSuccess(
                                     request_id,
@@ -736,16 +746,17 @@ impl App {
                     return None;
                 }
 
-                self.state.preview_cache.put(id.clone(), (*details).clone());
-                self.state.search_preview = Some((*details).clone());
+                let details = *details;
+                self.state.preview_cache.put(id.clone(), details.clone());
+                let cover_url = details.cover_url().map(str::to_string);
+                self.state.search_preview = Some(details);
                 self.state.poster_image = None;
                 self.state.poster_protocol = None;
                 if let Some(cached_img) = self.state.image_cache.get(&id) {
                     self.state.poster_image = Some(std::sync::Arc::clone(cached_img));
                 } else if self.state.image_supported
-                    && let Some(url) = details.cover_url()
+                    && let Some(url_clone) = cover_url
                 {
-                    let url_clone = url.to_string();
                     let action_tx = self.action_sender.clone();
                     let id_clone = id.clone();
                     let service = self.service.clone();
@@ -762,7 +773,10 @@ impl App {
 
             Action::PosterSuccess(id, img) => {
                 self.state.image_cache.put(id.clone(), img.clone());
-                self.state.search_posters.put(id.clone(), img.clone());
+                // Keep an existing grid thumbnail; the full poster is only a fallback tile.
+                if !self.state.search_posters.contains(&id) {
+                    self.state.search_posters.put(id.clone(), img.clone());
+                }
 
                 let current_id = if self.state.active_screen == Screen::Details {
                     self.state.active_subject_id.clone()
@@ -783,9 +797,8 @@ impl App {
             Action::SearchPosterLoaded(id, img_opt) => {
                 self.state.in_flight_posters.remove(&id);
                 if let Some(img) = img_opt {
-                    self.state
-                        .image_cache
-                        .put(id.clone(), std::sync::Arc::clone(&img));
+                    // Grid tiles are thumbnails; keep them out of `image_cache` so the
+                    // preview and details panes still load the full-size poster.
                     self.state.search_posters.put(id, img);
                 } else {
                     self.state.failed_posters.put(id, std::time::Instant::now());
@@ -1896,6 +1909,36 @@ mod tests {
     use super::*;
     use crate::providers::models::{ProviderKind, Release, SourceMirror};
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn newer_preview_request_aborts_the_previous_lookup() {
+        let mut app = App::new();
+        app.state.active_provider = ProviderKind::MovieBox;
+        app.handle_requests(Action::FetchPreview("preview-a".into()))
+            .await;
+        let first = app
+            .request_tasks
+            .preview
+            .as_ref()
+            .expect("preview task tracked")
+            .abort_handle();
+        app.handle_requests(Action::FetchPreview("preview-b".into()))
+            .await;
+        // Aborted tasks finish at their next poll.
+        for _ in 0..20 {
+            if first.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            first.is_finished(),
+            "superseded preview lookup must be aborted"
+        );
+        let second = app.request_tasks.preview.as_ref().unwrap();
+        assert!(!second.is_finished(), "latest lookup is still debouncing");
+        app.request_tasks.cancel_all();
+    }
 
     #[tokio::test]
     async fn single_season_post_requests_its_actual_season_and_episode() {

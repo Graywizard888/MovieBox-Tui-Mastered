@@ -335,6 +335,7 @@ impl App {
             }
         });
 
+        let service = self.service.clone();
         tokio::spawn(async move {
             let mut local_subtitle = subtitle.clone();
             let mut temporary_subtitle = None;
@@ -345,7 +346,7 @@ impl App {
                     | crate::tui::state::PlayerKind::AndroidIntent
             ) && let Some(ref url) = subtitle
             {
-                let download_res = crate::service::MovieBoxService::new()
+                let download_res = service
                     .download_subtitle_file(url, &headers, preferred_sub_name.as_deref())
                     .await;
                 match download_res {
@@ -758,11 +759,11 @@ fn is_user_quit(status: &std::process::ExitStatus) -> bool {
 fn clean_player_error(code: Option<i32>, signal: Option<i32>, stderr: &str) -> String {
     let trimmed = stderr.trim();
     if !trimmed.is_empty() {
-        let bounded = if trimmed.len() > 512 {
-            &trimmed[..512]
-        } else {
-            trimmed
-        };
+        let mut cut = trimmed.len().min(512);
+        while !trimmed.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let bounded = &trimmed[..cut];
         return bounded.to_string();
     }
 
@@ -1214,6 +1215,17 @@ mod tests {
             clean_player_error(Some(1), None, "VLC failed to open the stream"),
             "VLC failed to open the stream"
         );
+    }
+
+    #[test]
+    fn long_non_ascii_stderr_is_cut_on_a_char_boundary() {
+        // "a" then two-byte characters puts byte 512 inside a character.
+        let stderr = format!("a{}", "é".repeat(400));
+        let cleaned = clean_player_error(Some(1), None, &stderr);
+        assert!(cleaned.len() <= 512);
+        assert!(stderr.starts_with(&cleaned));
+        let bengali = "চলচ্চিত্র ".repeat(100);
+        assert!(clean_player_error(Some(1), None, &bengali).len() <= 512);
     }
 
     #[test]

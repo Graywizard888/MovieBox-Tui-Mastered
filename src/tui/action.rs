@@ -2,6 +2,11 @@
 pub enum Action {
     FocusChange,
     Tick,
+    PosterEncoded(
+        crate::tui::state::PosterTarget,
+        std::sync::Arc<image::DynamicImage>,
+        Option<crate::tui::state::EncodedPoster>,
+    ),
     Key(crossterm::event::KeyEvent),
     MouseClick(u16, u16),
     Quit,

@@ -888,6 +888,7 @@ impl App {
                             "MovieBox-Tui was updated successfully. Restarting process...",
                         );
 
+                        crate::cache::flush_deferred_writes();
                         crossterm::terminal::disable_raw_mode().ok();
                         crossterm::execute!(
                             std::io::stdout(),

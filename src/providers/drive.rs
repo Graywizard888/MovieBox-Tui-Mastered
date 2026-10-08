@@ -377,11 +377,13 @@ async fn bypass_cloud(client: &reqwest::Client, sid: &Url) -> Result<Url, Provid
 
 /// Extract owned labels and URLs before the resolver awaits network requests. `scraper::Html`
 /// is not Send and must not remain live across an `.await` in a spawned playback task.
+static DRIVE_BUTTONS: std::sync::LazyLock<Selector> =
+    std::sync::LazyLock::new(|| Selector::parse("div.text-center > a[href]").unwrap());
+
 fn drive_buttons(base: &Url, html: &str) -> Vec<(String, Url)> {
     let document = Html::parse_document(html);
-    let selector = Selector::parse("div.text-center > a[href]").unwrap();
     document
-        .select(&selector)
+        .select(&DRIVE_BUTTONS)
         .filter_map(|node| {
             let url = site::external_url(base, node.value().attr("href")?)?;
             let text = node.text().collect::<String>().to_ascii_lowercase();
