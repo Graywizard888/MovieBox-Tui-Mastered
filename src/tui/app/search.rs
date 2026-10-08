@@ -418,14 +418,13 @@ impl App {
                 Ok(details) => {
                     let id_for_cache = id.clone();
                     let details_for_cache = details.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         crate::cache::set_provider_details_cache_typed(
                             context.provider,
                             &id_for_cache,
                             &details_for_cache,
                         )
-                    })
-                    .await;
+                    });
                     sender
                         .send(Action::DetailsSuccess(
                             context,
@@ -688,7 +687,12 @@ impl App {
                     })
                     .await
                     {
-                        if let Some(img) = crate::service::decode_poster(bytes).await {
+                        if let Some(img) = crate::service::decode_poster_max(
+                            bytes,
+                            crate::service::THUMBNAIL_MAX_DIM,
+                        )
+                        .await
+                        {
                             tx.send(Action::SearchPosterLoaded(id_clone, Some(img)))
                                 .ok();
                             return;
@@ -708,22 +712,24 @@ impl App {
                                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                                     return;
                                 }
+                                // The disk cache is best-effort: write it in the background
+                                // so the tile does not wait on storage.
                                 let bytes_clone = bytes.clone();
                                 let id_c = id.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
+                                tokio::task::spawn_blocking(move || {
                                     crate::cache::set_namespaced_image_cache(
                                         "posters",
                                         &id_c,
                                         &bytes_clone,
                                     );
-                                })
-                                .await;
+                                });
 
-                                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                                    return;
-                                }
-
-                                if let Some(img) = crate::service::decode_poster(bytes).await {
+                                if let Some(img) = crate::service::decode_poster_max(
+                                    bytes,
+                                    crate::service::THUMBNAIL_MAX_DIM,
+                                )
+                                .await
+                                {
                                     tx.send(Action::SearchPosterLoaded(id, Some(img))).ok();
                                     return;
                                 }

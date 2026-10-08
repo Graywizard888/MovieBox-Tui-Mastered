@@ -274,18 +274,35 @@ pub fn load() -> Config {
     Config::default()
 }
 
+/// Saves the config and returns once it is on disk.
 pub fn save(config: &Config) {
+    if queue_save(config) {
+        crate::cache::flush_deferred_writes();
+    }
+}
+
+/// Saves the config off the calling thread. Used from the UI, where an fsync per
+/// settings keypress would stall input. Pending saves are flushed on quit.
+pub fn save_deferred(config: &Config) {
     let Some(path) = config_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     if let Ok(json) = serde_json::to_string_pretty(config) {
-        if let Err(error) = crate::cache::atomic_write_file(&path, json.as_bytes()) {
-            log::warn!("failed to write config: {error}");
-        }
+        crate::cache::atomic_write_file_deferred(path, json.into_bytes());
     }
+}
+
+/// Queues the config through the same writer as [`save_deferred`], so a synchronous save
+/// can never be overtaken by an older deferred one.
+fn queue_save(config: &Config) -> bool {
+    let Some(path) = config_path() else {
+        return false;
+    };
+    let Ok(json) = serde_json::to_string_pretty(config) else {
+        return false;
+    };
+    crate::cache::queue_deferred_write(path, json.into_bytes());
+    true
 }
 
 pub fn load_addons() -> Vec<InstalledAddon> {
@@ -339,9 +356,8 @@ pub fn save_addons(addons: &[InstalledAddon]) {
     let Ok(json) = serde_json::to_string_pretty(addons) else {
         return;
     };
-    if let Err(error) = crate::cache::atomic_write_file(&path, json.as_bytes()) {
-        log::warn!("failed to write addons config: {error}");
-    }
+    crate::cache::queue_deferred_write(path, json.into_bytes());
+    crate::cache::flush_deferred_writes();
 }
 
 #[cfg(test)]

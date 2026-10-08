@@ -1,6 +1,33 @@
 use crate::providers::models::ProviderKind;
 use ratatui::widgets::{ListState, TableState};
 
+/// Which poster slot an off-thread image encode is for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PosterTarget {
+    /// A search grid tile, keyed by result id and target size in cells.
+    Grid(String, (u16, u16)),
+    /// The large poster on the preview / details pane.
+    Detail(ratatui::layout::Rect),
+}
+
+/// An image the draw pass needs encoded for the terminal graphics protocol. Encoding
+/// (resize + sixel/kitty/iterm2) is too slow for the UI thread, so draw queues it and
+/// the run loop hands it to the blocking pool.
+pub struct PosterEncodeJob {
+    pub target: PosterTarget,
+    pub image: std::sync::Arc<image::DynamicImage>,
+}
+
+/// A finished encode. Wrapped so `Action` can stay `Debug`.
+#[derive(Clone)]
+pub struct EncodedPoster(pub ratatui_image::protocol::Protocol);
+
+impl std::fmt::Debug for EncodedPoster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EncodedPoster")
+    }
+}
+
 pub use crate::player::PlayerKind;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +399,13 @@ pub struct AppState {
     pub sources_list_state: ListState,
 
     pub poster_protocol: Option<(ratatui::layout::Rect, ratatui_image::protocol::Protocol)>,
+    /// Encodes queued by the last draw, drained by the run loop.
+    pub pending_poster_encodes: Vec<PosterEncodeJob>,
+    /// Grid tiles currently being encoded, so draw does not queue them twice.
+    pub encoding_grid_posters: std::collections::HashSet<(String, (u16, u16))>,
+    /// Detail poster currently being encoded: target area and the source image.
+    pub encoding_detail_poster:
+        Option<(ratatui::layout::Rect, std::sync::Arc<image::DynamicImage>)>,
     pub image_picker: Option<ratatui_image::picker::Picker>,
     pub image_supported: bool,
     pub clear_terminal_before_draw: bool,
@@ -552,6 +586,9 @@ impl Default for AppState {
             sources_list_state: ListState::default(),
 
             poster_protocol: None,
+            pending_poster_encodes: Vec::new(),
+            encoding_grid_posters: std::collections::HashSet::new(),
+            encoding_detail_poster: None,
             image_picker: None,
             image_supported: crate::tui::terminal::should_query_images(),
             clear_terminal_before_draw: false,
@@ -1257,6 +1294,9 @@ impl AppState {
         self.search_poster_protocols.clear();
         self.failed_posters.clear();
         self.in_flight_posters.clear();
+        self.pending_poster_encodes.clear();
+        self.encoding_grid_posters.clear();
+        self.encoding_detail_poster = None;
     }
 
     pub fn clear_poster_protocols(&mut self) {

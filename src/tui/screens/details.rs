@@ -566,37 +566,38 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) 
             .split(inner_area);
 
         let poster_area = chunks[0];
-        if let Some(img) = &state.poster_image {
-            if !modal_active {
-                if let Some(picker) = &mut state.image_picker {
-                    let img_width = poster_area.width;
-                    let img_height = poster_area.height;
-                    if img_width > 0 && img_height > 0 {
-                        crate::tui::clear_area(frame, poster_area, theme);
-                        if let Some((proto_area, proto)) = &mut state.poster_protocol {
-                            if proto_area.width == img_width && proto_area.height == img_height {
-                                let image_widget = ratatui_image::Image::new(proto);
-                                frame.render_widget(image_widget, poster_area);
-                            } else if let Ok(protocol) = picker.new_protocol(
-                                (**img).clone(),
-                                poster_area.into(),
-                                ratatui_image::Resize::Fit(None),
-                            ) {
-                                state.poster_protocol = Some((poster_area, protocol));
-                                if let Some((_, p)) = &state.poster_protocol {
-                                    let image_widget = ratatui_image::Image::new(p);
-                                    frame.render_widget(image_widget, poster_area);
-                                }
-                            }
-                        } else if let Ok(protocol) = picker.new_protocol(
-                            (**img).clone(),
-                            poster_area.into(),
-                            ratatui_image::Resize::Fit(None),
-                        ) {
-                            state.poster_protocol = Some((poster_area, protocol));
-                            if let Some((_, p)) = &state.poster_protocol {
-                                let image_widget = ratatui_image::Image::new(p);
-                                frame.render_widget(image_widget, poster_area);
+        if let Some(img) = state.poster_image.clone() {
+            if !modal_active && state.image_picker.is_some() {
+                let img_width = poster_area.width;
+                let img_height = poster_area.height;
+                if img_width > 0 && img_height > 0 {
+                    crate::tui::clear_area(frame, poster_area, theme);
+                    match &state.poster_protocol {
+                        Some((proto_area, proto))
+                            if proto_area.width == img_width && proto_area.height == img_height =>
+                        {
+                            frame.render_widget(ratatui_image::Image::new(proto), poster_area);
+                        }
+                        _ => {
+                            // Encode off the UI thread; the protocol lands via an action.
+                            let already_queued =
+                                state
+                                    .encoding_detail_poster
+                                    .as_ref()
+                                    .is_some_and(|(area, src)| {
+                                        *area == poster_area && std::sync::Arc::ptr_eq(src, &img)
+                                    });
+                            if !already_queued {
+                                state.encoding_detail_poster =
+                                    Some((poster_area, std::sync::Arc::clone(&img)));
+                                state.pending_poster_encodes.push(
+                                    crate::tui::state::PosterEncodeJob {
+                                        target: crate::tui::state::PosterTarget::Detail(
+                                            poster_area,
+                                        ),
+                                        image: img,
+                                    },
+                                );
                             }
                         }
                     }

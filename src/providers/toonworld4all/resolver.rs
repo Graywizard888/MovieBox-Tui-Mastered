@@ -187,12 +187,14 @@ fn pixeldrain_media(url: &Url) -> Option<Url> {
     Some(result)
 }
 
+static LINKS: std::sync::LazyLock<Selector> =
+    std::sync::LazyLock::new(|| Selector::parse("a[href]").unwrap());
+
 fn download_links(base: &Url, html: &str) -> Vec<Url> {
     let document = Html::parse_document(html);
-    let selector = Selector::parse("a[href]").unwrap();
     let mut seen = HashSet::new();
     document
-        .select(&selector)
+        .select(&LINKS)
         .filter_map(|link| {
             let label = site::text(Some(link))
                 .unwrap_or_default()

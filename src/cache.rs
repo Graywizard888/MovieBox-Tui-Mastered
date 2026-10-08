@@ -84,7 +84,7 @@ pub fn set_typed_cache<T: Serialize + ?Sized>(path: &Path, expiry_secs: u64, dat
     let mut file_bytes = Vec::with_capacity(512);
     file_bytes.extend_from_slice(&CACHE_MAGIC);
     if rmp_serde::encode::write(&mut file_bytes, &envelope).is_ok() {
-        if let Err(error) = atomic_write_file(path, &file_bytes) {
+        if let Err(error) = write_cache_file(path, &file_bytes) {
             log::warn!(
                 "failed to write cache file {}: {error}",
                 crate::logging::sanitize_path(path)
@@ -123,6 +123,89 @@ pub fn atomic_write_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Resul
     let temporary = path.with_extension(format!("tmp-{}-{stamp}", std::process::id()));
     write_durable(&temporary, bytes)?;
     match durable_replace(&temporary, path, &format!("{stamp}-f")) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            Err(error)
+        }
+    }
+}
+
+/// Files queued for a durable write, newest bytes per path. Writers coalesce, so a burst
+/// of saves (holding a settings arrow key) costs one fsync rather than one per keypress.
+static DEFERRED_WRITES: std::sync::Mutex<Option<HashMap<PathBuf, Vec<u8>>>> =
+    std::sync::Mutex::new(None);
+/// Serializes the actual writes so an older payload can never land after a newer one.
+static DEFERRED_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Queues a durable atomic write and performs it off the calling thread when a Tokio
+/// runtime is available (synchronously otherwise). Call [`flush_deferred_writes`]
+/// before exit.
+pub fn atomic_write_file_deferred(path: PathBuf, bytes: Vec<u8>) {
+    queue_deferred_write(path, bytes);
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(flush_deferred_writes);
+        }
+        Err(_) => flush_deferred_writes(),
+    }
+}
+
+/// Queues a write without starting it; pair with [`flush_deferred_writes`].
+pub fn queue_deferred_write(path: PathBuf, bytes: Vec<u8>) {
+    DEFERRED_WRITES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(path, bytes);
+}
+
+/// Writes every queued file now, waiting for any write already in progress.
+pub fn flush_deferred_writes() {
+    let _write_guard = DEFERRED_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        let next = {
+            let mut pending = DEFERRED_WRITES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending.as_mut().and_then(|map| {
+                let key = map.keys().next().cloned()?;
+                map.remove_entry(&key)
+            })
+        };
+        let Some((path, bytes)) = next else {
+            break;
+        };
+        if let Err(error) = atomic_write_file(&path, &bytes) {
+            log::warn!(
+                "failed to write {}: {error}",
+                crate::logging::sanitize_path(&path)
+            );
+        }
+    }
+}
+
+/// Writes a regenerable cache entry: temp file then rename, without fsync. A crash can
+/// at worst lose the entry, which is refetched; durable writes stay for user data.
+pub fn write_cache_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("tmp-{}-{stamp}", std::process::id()));
+    fs::write(&temporary, bytes)?;
+    if fs::rename(&temporary, path).is_ok() {
+        return Ok(());
+    }
+    // Windows cannot rename over an open or existing file in every case; retry after
+    // removing the target, as the durable path does.
+    let _ = fs::remove_file(path);
+    match fs::rename(&temporary, path) {
         Ok(()) => Ok(()),
         Err(error) => {
             let _ = fs::remove_file(&temporary);
@@ -524,7 +607,7 @@ pub fn get_namespaced_image_cache(namespace: &str, id: &str) -> Option<Vec<u8>> 
 
 pub fn set_namespaced_image_cache(namespace: &str, id: &str, bytes: &[u8]) {
     let path = get_namespaced_image_path(namespace, id);
-    if let Err(error) = atomic_write_file(&path, bytes) {
+    if let Err(error) = write_cache_file(&path, bytes) {
         log::warn!(
             "failed to commit image cache to {}: {error}",
             crate::logging::sanitize_path(&path)
@@ -697,41 +780,152 @@ pub fn clear_all_cache() -> Result<(), String> {
     }
 }
 
+/// Upper bound for the on-disk cache. Posters dominate it; without a cap a week of heavy
+/// browsing could grow it without limit before age-based cleanup runs.
+const CACHE_SIZE_BUDGET: u64 = 300 * 1024 * 1024;
+
 pub fn clean_old_cache_background() {
     tokio::task::spawn_blocking(|| {
         let path = crate::config::cache_dir();
-        if !path.exists() {
-            return;
-        }
-
-        let max_age = 7 * 24 * 60 * 60;
-
-        let mut dirs_to_check = vec![path];
-        while let Some(dir) = dirs_to_check.pop() {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
-                        if metadata.is_dir() {
-                            dirs_to_check.push(entry.path());
-                        } else if metadata.is_file() {
-                            if let Ok(modified) = metadata.modified() {
-                                if let Ok(elapsed) = modified.elapsed() {
-                                    if elapsed.as_secs() > max_age {
-                                        let _ = fs::remove_file(entry.path());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if path.exists() {
+            clean_cache_dir(&path, 7 * 24 * 60 * 60, CACHE_SIZE_BUDGET);
         }
     });
+}
+
+/// Removes files older than `max_age_secs`, then evicts the oldest remaining files until
+/// the directory fits in `budget_bytes` (down to 80% of it, so the next run has slack).
+fn clean_cache_dir(root: &Path, max_age_secs: u64, budget_bytes: u64) {
+    let mut kept: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
+    let mut total = 0u64;
+    let mut dirs_to_check = vec![root.to_path_buf()];
+    while let Some(dir) = dirs_to_check.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                dirs_to_check.push(entry.path());
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            if modified
+                .elapsed()
+                .is_ok_and(|elapsed| elapsed.as_secs() > max_age_secs)
+            {
+                let _ = fs::remove_file(entry.path());
+                continue;
+            }
+            total += metadata.len();
+            kept.push((entry.path(), modified, metadata.len()));
+        }
+    }
+
+    if total <= budget_bytes {
+        return;
+    }
+    let target = budget_bytes / 10 * 8;
+    kept.sort_by_key(|(_, modified, _)| *modified);
+    for (file, _, size) in kept {
+        if total <= target {
+            break;
+        }
+        if fs::remove_file(&file).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deferred_writes_keep_only_the_newest_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.json");
+        for i in 0..50 {
+            atomic_write_file_deferred(target.clone(), format!("v{i}").into_bytes());
+        }
+        // A synchronous flush waits for in-flight writers and drains the queue.
+        flush_deferred_writes();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "v49");
+
+        queue_deferred_write(target.clone(), b"final".to_vec());
+        flush_deferred_writes();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "final");
+    }
+
+    #[test]
+    fn deferred_write_without_runtime_writes_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested").join("file.json");
+        atomic_write_file_deferred(target.clone(), b"now".to_vec());
+        assert_eq!(fs::read(&target).unwrap(), b"now");
+    }
+
+    #[test]
+    fn cache_file_write_replaces_existing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a").join("entry");
+        write_cache_file(&target, b"one").unwrap();
+        write_cache_file(&target, b"two").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"two");
+        let leftovers = fs::read_dir(target.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1, "no temp files left behind");
+    }
+
+    #[test]
+    fn cache_cleanup_evicts_oldest_files_over_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("posters");
+        fs::create_dir_all(&nested).unwrap();
+        let old = nested.join("old");
+        let mid = dir.path().join("mid");
+        let new = nested.join("new");
+        for (path, age_secs) in [(&old, 300u64), (&mid, 200), (&new, 100)] {
+            fs::write(path, vec![0u8; 1000]).unwrap();
+            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        // 3000 bytes on disk, budget 2500: evict down to 2000 by removing the oldest.
+        clean_cache_dir(dir.path(), 7 * 24 * 60 * 60, 2500);
+        assert!(!old.exists());
+        assert!(mid.exists());
+        assert!(new.exists());
+    }
+
+    #[test]
+    fn cache_cleanup_keeps_everything_under_budget_and_drops_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh");
+        let stale = dir.path().join("stale");
+        fs::write(&fresh, b"x").unwrap();
+        fs::write(&stale, b"x").unwrap();
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(10_000);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        clean_cache_dir(dir.path(), 5_000, 1024);
+        assert!(fresh.exists());
+        assert!(!stale.exists());
+    }
 
     #[test]
     fn rotating_wordpress_providers_never_reuse_unscoped_disk_cache() {

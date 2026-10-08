@@ -114,6 +114,7 @@ impl App {
                 }
                 self.state.dirty = false;
             }
+            self.dispatch_poster_encodes();
 
             tokio::select! {
                 Some(action) = events.next() => {
@@ -331,6 +332,7 @@ impl App {
         match action {
             Action::Quit => {
                 self.request_tasks.cancel_all();
+                crate::cache::flush_deferred_writes();
                 self.state
                     .cancel_download
                     .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -342,6 +344,10 @@ impl App {
 
             Action::Key(key) => {
                 self.handle_key(key).await;
+            }
+
+            Action::PosterEncoded(target, source, encoded) => {
+                self.apply_poster_encode(target, source, encoded);
             }
 
             Action::MouseClick(col, row) => {
@@ -495,6 +501,85 @@ impl App {
             }
         }
         None
+    }
+
+    /// Hands poster encodes queued by the last draw to the blocking pool. Sixel and
+    /// kitty encoding (resize + quantize) would otherwise stall the frame.
+    pub(super) fn dispatch_poster_encodes(&mut self) {
+        if self.state.pending_poster_encodes.is_empty() {
+            return;
+        }
+        let jobs = std::mem::take(&mut self.state.pending_poster_encodes);
+        let Some(picker) = self.state.image_picker.clone() else {
+            return;
+        };
+        for job in jobs {
+            let picker = picker.clone();
+            let sender = self.action_sender.clone();
+            tokio::task::spawn_blocking(move || {
+                let size = match &job.target {
+                    crate::tui::state::PosterTarget::Grid(_, (w, h)) => {
+                        ratatui::layout::Size::new(*w, *h)
+                    }
+                    crate::tui::state::PosterTarget::Detail(area) => (*area).into(),
+                };
+                let encoded = picker
+                    .new_protocol((*job.image).clone(), size, ratatui_image::Resize::Fit(None))
+                    .ok()
+                    .map(crate::tui::state::EncodedPoster);
+                sender
+                    .send(Action::PosterEncoded(job.target, job.image, encoded))
+                    .ok();
+            });
+        }
+    }
+
+    pub(super) fn apply_poster_encode(
+        &mut self,
+        target: crate::tui::state::PosterTarget,
+        source: std::sync::Arc<image::DynamicImage>,
+        encoded: Option<crate::tui::state::EncodedPoster>,
+    ) {
+        use crate::tui::state::PosterTarget;
+        match target {
+            PosterTarget::Grid(id, dims) => {
+                // On failure the key stays marked so draw does not retry every frame.
+                let Some(encoded) = encoded else {
+                    return;
+                };
+                let key = (id, dims);
+                self.state.encoding_grid_posters.remove(&key);
+                let current = self
+                    .state
+                    .search_posters
+                    .peek(&key.0)
+                    .is_some_and(|img| std::sync::Arc::ptr_eq(img, &source));
+                if current {
+                    self.state
+                        .search_poster_protocols
+                        .put(key.0, (key.1, encoded.0));
+                }
+            }
+            PosterTarget::Detail(area) => {
+                let still_wanted = self.state.encoding_detail_poster.as_ref().is_some_and(
+                    |(pending_area, pending)| {
+                        *pending_area == area && std::sync::Arc::ptr_eq(pending, &source)
+                    },
+                );
+                let shows_source = self
+                    .state
+                    .poster_image
+                    .as_ref()
+                    .is_some_and(|img| std::sync::Arc::ptr_eq(img, &source));
+                if !still_wanted || !shows_source {
+                    return;
+                }
+                if let Some(encoded) = encoded {
+                    self.state.encoding_detail_poster = None;
+                    self.state.poster_protocol = Some((area, encoded.0));
+                }
+            }
+        }
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -1538,6 +1623,112 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn kitty_picker() -> ratatui_image::picker::Picker {
+        #[allow(deprecated)]
+        let mut picker = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize {
+            width: 10,
+            height: 20,
+        });
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        picker
+    }
+
+    async fn next_encoded(app: &mut App) -> Action {
+        tokio::time::timeout(Duration::from_secs(10), app.action_receiver.recv())
+            .await
+            .expect("encode finished")
+            .expect("channel open")
+    }
+
+    #[tokio::test]
+    async fn grid_posters_encode_off_the_ui_thread_and_land_via_action() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut app = App::new();
+        app.state.active_screen = Screen::Home;
+        app.state.input_mode = InputMode::Normal;
+        app.state.image_supported = true;
+        app.state.image_picker = Some(kitty_picker());
+        app.state.poster_rows = 5;
+        app.state.search_results = (0..4)
+            .map(|i| crate::models::SearchResult {
+                id: format!("id{i}"),
+                title: format!("Movie {i}"),
+                stype: 1,
+                release_year: "2020".to_string(),
+                provider: crate::models::ProviderKind::MovieBox,
+                cover_url: None,
+                season: 0,
+                episode: 0,
+            })
+            .collect();
+        app.state.search_list_state.select(Some(0));
+        let image = std::sync::Arc::new(image::DynamicImage::new_rgb8(200, 300));
+        for i in 0..4 {
+            app.state
+                .search_posters
+                .put(format!("id{i}"), std::sync::Arc::clone(&image));
+        }
+
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let queued = app.state.pending_poster_encodes.len();
+        assert!(queued > 0, "draw should queue encodes instead of encoding");
+        assert!(app.state.search_poster_protocols.is_empty());
+
+        // A second frame before results arrive must not queue duplicates.
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert_eq!(app.state.pending_poster_encodes.len(), queued);
+
+        app.dispatch_poster_encodes();
+        assert!(app.state.pending_poster_encodes.is_empty());
+        for _ in 0..queued {
+            let action = next_encoded(&mut app).await;
+            assert!(matches!(action, Action::PosterEncoded(..)));
+            app.handle_action(action).await;
+        }
+        assert_eq!(app.state.search_poster_protocols.len(), queued);
+        assert!(app.state.encoding_grid_posters.is_empty());
+
+        // With protocols ready, the next frame queues nothing.
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(app.state.pending_poster_encodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_detail_poster_encode_is_discarded() {
+        let mut app = App::new();
+        app.state.image_picker = Some(kitty_picker());
+        let old = std::sync::Arc::new(image::DynamicImage::new_rgb8(20, 30));
+        let new = std::sync::Arc::new(image::DynamicImage::new_rgb8(20, 30));
+        let area = Rect::new(0, 0, 10, 8);
+        app.state.poster_image = Some(std::sync::Arc::clone(&new));
+        app.state.encoding_detail_poster = Some((area, std::sync::Arc::clone(&new)));
+        app.state
+            .pending_poster_encodes
+            .push(crate::tui::state::PosterEncodeJob {
+                target: crate::tui::state::PosterTarget::Detail(area),
+                image: std::sync::Arc::clone(&old),
+            });
+        app.dispatch_poster_encodes();
+        let action = next_encoded(&mut app).await;
+        app.handle_action(action).await;
+        assert!(
+            app.state.poster_protocol.is_none(),
+            "result for a replaced image is dropped"
+        );
+
+        app.state
+            .pending_poster_encodes
+            .push(crate::tui::state::PosterEncodeJob {
+                target: crate::tui::state::PosterTarget::Detail(area),
+                image: std::sync::Arc::clone(&new),
+            });
+        app.dispatch_poster_encodes();
+        let action = next_encoded(&mut app).await;
+        app.handle_action(action).await;
+        assert!(app.state.poster_protocol.is_some());
+        assert!(app.state.encoding_detail_poster.is_none());
+    }
 
     #[test]
     fn test_download_bar_rendering_modern_and_basic() {

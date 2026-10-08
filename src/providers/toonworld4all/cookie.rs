@@ -39,7 +39,9 @@ pub fn now_secs() -> u64 {
 /// Cleans text pasted into the Settings field. `Ok(None)` means "clear it".
 pub fn normalize(input: &str) -> Result<Option<String>, &'static str> {
     let mut text = input.trim();
-    if text.len() >= 7 && text[..7].eq_ignore_ascii_case("cookie:") {
+    if let Some(prefix) = text.get(..7)
+        && prefix.eq_ignore_ascii_case("cookie:")
+    {
         text = text[7..].trim();
     }
     if text.is_empty() {
@@ -149,6 +151,13 @@ pub fn save(value: Option<&str>) -> io::Result<Option<StoredCookie>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_accepts_multibyte_text_near_the_prefix() {
+        // Byte 7 falls inside "é"; this used to panic on the slice.
+        let _ = normalize("abcdeé=1");
+        let _ = normalize("ééééé");
+    }
 
     #[test]
     fn normalize_trims_strips_the_header_name_and_rejects_line_breaks() {

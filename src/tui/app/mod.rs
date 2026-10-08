@@ -28,6 +28,7 @@ pub struct RequestTaskHandles {
     pub download: Option<tokio::task::JoinHandle<()>>,
     pub stream_pool_init: Option<tokio::task::JoinHandle<()>>,
     pub episode_prefetch: Option<tokio::task::JoinHandle<()>>,
+    pub preview: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RequestTaskHandles {
@@ -76,6 +77,20 @@ impl RequestTaskHandles {
         if let Some(h) = self.episode_prefetch.take() {
             h.abort();
         }
+    }
+
+    pub fn cancel_preview(&mut self) {
+        if let Some(h) = self.preview.take() {
+            h.abort();
+        }
+    }
+
+    pub fn spawn_preview<F>(&mut self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.cancel_preview();
+        self.preview = Some(tokio::spawn(future));
     }
 
     pub fn spawn_search<F>(&mut self, future: F)
@@ -151,6 +166,7 @@ impl RequestTaskHandles {
         self.cancel_download();
         self.cancel_stream_pool_init();
         self.cancel_episode_prefetch();
+        self.cancel_preview();
     }
 }
 
@@ -341,7 +357,7 @@ impl App {
             mpv_path: self.state.mpv_path.clone(),
             iina_path: self.state.iina_path.clone(),
         };
-        crate::tui::config::save(&config);
+        crate::tui::config::save_deferred(&config);
     }
 
     fn save_installed_addons(&self) {

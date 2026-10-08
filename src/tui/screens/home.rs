@@ -1596,27 +1596,41 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) 
                 if state.image_supported && poster_area.width > 0 {
                     if let Some(img) = state.search_posters.peek(&res.id) {
                         let target_dims = (poster_area.width, state.poster_rows);
-                        let needs_protocol =
-                            state.search_poster_protocols.peek(&res.id).map(|(d, _)| *d)
-                                != Some(target_dims);
-                        if needs_protocol {
-                            if let Some(picker) = &mut state.image_picker {
-                                let size = ratatui::layout::Size::new(target_dims.0, target_dims.1);
-                                if let Ok(proto) = picker.new_protocol(
-                                    (**img).clone(),
-                                    size,
-                                    ratatui_image::Resize::Fit(None),
-                                ) {
-                                    state
-                                        .search_poster_protocols
-                                        .put(res.id.clone(), (target_dims, proto));
-                                }
-                            }
-                        }
-                        if let Some((_, proto)) = state.search_poster_protocols.peek(&res.id) {
-                            if !state.has_active_modal() {
+                        let ready = state
+                            .search_poster_protocols
+                            .peek(&res.id)
+                            .is_some_and(|(d, _)| *d == target_dims);
+                        if ready {
+                            if let Some((_, proto)) = state.search_poster_protocols.peek(&res.id)
+                                && !state.has_active_modal()
+                            {
                                 frame.render_widget(ratatui_image::Image::new(proto), p_area);
                             }
+                        } else {
+                            // Encoding runs off the UI thread; show the loading tile until
+                            // the protocol arrives.
+                            let key = (res.id.clone(), target_dims);
+                            if state.image_picker.is_some()
+                                && !state.encoding_grid_posters.contains(&key)
+                            {
+                                let image = std::sync::Arc::clone(img);
+                                state.encoding_grid_posters.insert(key.clone());
+                                state.pending_poster_encodes.push(
+                                    crate::tui::state::PosterEncodeJob {
+                                        target: crate::tui::state::PosterTarget::Grid(key.0, key.1),
+                                        image,
+                                    },
+                                );
+                            }
+                            render_poster_placeholder(
+                                frame,
+                                p_area,
+                                theme,
+                                state.basic_terminal,
+                                state.image_picker.is_some(),
+                                state.tick_count,
+                                modal_active,
+                            );
                         }
                     } else {
                         let is_in_flight = state.in_flight_posters.contains(&res.id);

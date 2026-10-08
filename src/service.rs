@@ -482,10 +482,10 @@ impl MovieBoxService {
         let ns = namespace.to_string();
         let id_owned = id.to_string();
         let bytes_clone = bytes.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        // Best-effort cache write; the poster should not wait on storage.
+        tokio::task::spawn_blocking(move || {
             crate::cache::set_namespaced_image_cache(&ns, &id_owned, &bytes_clone);
-        })
-        .await;
+        });
         decode_poster(bytes).await
     }
 
@@ -543,14 +543,24 @@ impl MovieBoxService {
     }
 }
 
+/// Longest side kept for the large preview / details poster.
+pub const POSTER_MAX_DIM: u32 = 512;
+/// Longest side kept for search grid tiles. Tiles are drawn about 96 px tall, so this
+/// leaves headroom for dense terminals while using well under half the memory of a
+/// full poster and making each protocol encode cheaper.
+pub const THUMBNAIL_MAX_DIM: u32 = 320;
+
 pub async fn decode_poster(bytes: Vec<u8>) -> Option<Arc<image::DynamicImage>> {
+    decode_poster_max(bytes, POSTER_MAX_DIM).await
+}
+
+pub async fn decode_poster_max(bytes: Vec<u8>, max_dim: u32) -> Option<Arc<image::DynamicImage>> {
     tokio::task::spawn_blocking(move || {
         let img = image::load_from_memory(&bytes).ok()?;
-        const MAX_DIM: u32 = 512;
-        let downscaled = if img.width().max(img.height()) <= MAX_DIM {
+        let downscaled = if img.width().max(img.height()) <= max_dim {
             img
         } else {
-            img.resize(MAX_DIM, MAX_DIM, image::imageops::FilterType::Triangle)
+            img.resize(max_dim, max_dim, image::imageops::FilterType::Triangle)
         };
         Some(Arc::new(downscaled))
     })
@@ -704,6 +714,18 @@ mod tests {
         assert!(decoded.height() <= 512);
         assert_eq!(decoded.width(), 512);
         assert_eq!(decoded.height(), 384);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_decode_uses_the_smaller_cap() {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        let img = image::DynamicImage::new_rgb8(600, 900);
+        img.write_to(&mut buffer, image::ImageFormat::Png).unwrap();
+        let decoded = decode_poster_max(buffer.into_inner(), THUMBNAIL_MAX_DIM)
+            .await
+            .unwrap();
+        assert_eq!(decoded.height(), THUMBNAIL_MAX_DIM);
+        assert_eq!(decoded.width(), 213);
     }
 
     #[test]
