@@ -1055,13 +1055,16 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
             "seek emulation: refusing the end-of-file read at {start} of {}",
             meta.total
         );
+        // No `Content-Length: 0`: FFmpeg 8+ keeps a refused seek's length as the file size
+        // when it falls back to the old connection, then reports end of file at once (players
+        // such as StreamX close). The empty body is ended by closing this connection instead.
         let response = format!(
-            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: {conn}\r\n\r\n",
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nConnection: close\r\n\r\n",
             meta.total
         );
         writer.write_all(response.as_bytes()).await?;
         writer.flush().await?;
-        return Ok(Some(!client_close));
+        return Ok(Some(false));
     }
     let length = end - start + 1;
     let partial = range_header.is_some() && (start, end) != (0, meta.total.saturating_sub(1));
@@ -2430,6 +2433,8 @@ mod tests {
             end.headers()["content-range"].to_str().unwrap(),
             format!("bytes */{total}")
         );
+        // FFmpeg 8+ would take a `Content-Length: 0` here as the file size and stop playback.
+        assert!(!end.headers().contains_key("content-length"));
 
         let middle = get("bytes=1000000-1000999".into()).await;
         assert_eq!(middle.status(), 206);
