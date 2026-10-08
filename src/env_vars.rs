@@ -28,6 +28,9 @@ pub enum Kind {
     Number,
     /// An `http(s)://` origin.
     Url,
+    /// The ToonWorld cookie: kept in its own private file by
+    /// [`crate::providers::toonworld4all::cookie`], never in `env_vars`.
+    Cookie,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +51,7 @@ const fn spec(name: &'static str, help: &'static str, kind: Kind, applies: Appli
 }
 
 /// Every variable that can be set from Settings. `MOVIEBOX_CONFIG_DIR` is left out because this
-/// file lives in that folder, and `MOVIEBOX_TOONWORLD_COOKIE` has its own row in General.
+/// file lives in that folder.
 pub const SPECS: &[Spec] = &[
     spec(
         "MOVIEBOX_SEEK_PROXY_MAX_MB",
@@ -200,6 +203,12 @@ pub const SPECS: &[Spec] = &[
         Kind::Url,
         Applies::Restart,
     ),
+    spec(
+        "MOVIEBOX_TOONWORLD_COOKIE",
+        "Browser cookie that passed the ToonWorld4All archive's ad gate (lasts about 24 hours).",
+        Kind::Cookie,
+        Applies::Now,
+    ),
 ];
 
 static SAVED: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
@@ -232,6 +241,10 @@ pub fn normalize(spec: &Spec, input: &str) -> Result<Option<String>, String> {
         return Err("The value must be a single line.".into());
     }
     match spec.kind {
+        Kind::Cookie => {
+            return crate::providers::toonworld4all::cookie::normalize(value)
+                .map_err(str::to_string);
+        }
         Kind::Text => {}
         Kind::Number => {
             if value.parse::<u64>().is_err() {
@@ -264,7 +277,9 @@ fn parse(content: &str) -> BTreeMap<String, String> {
             }
             let (name, value) = line.split_once('=')?;
             let (name, value) = (name.trim(), value.trim());
-            let known = SPECS.iter().any(|spec| spec.name == name);
+            let known = SPECS
+                .iter()
+                .any(|spec| spec.name == name && spec.kind != Kind::Cookie);
             (known && !value.is_empty()).then(|| (name.to_string(), value.to_string()))
         })
         .collect()

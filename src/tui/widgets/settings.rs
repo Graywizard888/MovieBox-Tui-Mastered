@@ -382,7 +382,7 @@ fn render_row(
 }
 
 fn render_general_settings(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let row_rects = settings_row_rects_in_area(area, 4);
+    let row_rects = settings_row_rects_in_area(area, 3);
     let has_active_popup = has_active_settings_popup(state);
 
     if let Some(&row_area) = row_rects.first() {
@@ -503,36 +503,6 @@ fn render_general_settings(frame: &mut Frame, area: Rect, state: &AppState, them
                 is_selected,
                 has_active_popup,
                 label: "Download Folder",
-                value_spans,
-            },
-            theme,
-            state.basic_terminal,
-        );
-    }
-
-    if let Some(&row_area) = row_rects.get(3) {
-        let is_selected = state.settings_selected_row == 3;
-        let budget = (row_area.width as usize).saturating_sub(24).clamp(10, 60);
-        let value_spans =
-            if let Some(input) = state.settings_text_input.as_ref().filter(|_| is_selected) {
-                tail_input_spans(input, budget, state, theme)
-            } else {
-                let base_style = if has_active_popup {
-                    theme.muted
-                } else if state.basic_terminal {
-                    theme.text_dim
-                } else {
-                    theme.subtext1
-                };
-                toonworld_cookie_summary(budget, base_style, has_active_popup, theme)
-            };
-        render_row(
-            frame,
-            row_area,
-            SettingRow {
-                is_selected,
-                has_active_popup,
-                label: "ToonWorld Cookie",
                 value_spans,
             },
             theme,
@@ -971,6 +941,8 @@ fn render_env_settings(frame: &mut Frame, area: Rect, state: &AppState, theme: &
         let value_spans =
             if let Some(input) = state.settings_text_input.as_ref().filter(|_| is_selected) {
                 tail_input_spans(input, budget, state, theme)
+            } else if spec.kind == env_vars::Kind::Cookie {
+                toonworld_cookie_summary(budget, dim, has_active_popup, theme)
             } else if let Some(shell) = env_vars::shell(spec.name) {
                 let text = format!("shell: {shell}");
                 let style = if has_active_popup || state.basic_terminal {
@@ -1316,7 +1288,7 @@ mod tests {
         assert_eq!(cat_modes, Some(SettingsCategory::ContentModes));
 
         let (_, row_rects) = settings_row_rects(popup, SettingsCategory::General, 0, 0);
-        assert_eq!(row_rects.len(), 4);
+        assert_eq!(row_rects.len(), 3);
 
         let clicked_row =
             settings_row_at(popup, SettingsCategory::General, 0, 0, 40, row_rects[0].y);

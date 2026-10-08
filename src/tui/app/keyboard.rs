@@ -512,13 +512,6 @@ impl App {
                 }
                 KeyCode::Char('d') | KeyCode::Char('D')
                     if self.state.settings_category
-                        == crate::tui::state::SettingsCategory::General
-                        && self.state.settings_selected_row == 3 =>
-                {
-                    self.clear_toonworld_cookie();
-                }
-                KeyCode::Char('d') | KeyCode::Char('D')
-                    if self.state.settings_category
                         == crate::tui::state::SettingsCategory::EnvVars =>
                 {
                     self.clear_env_var(self.state.settings_selected_row);

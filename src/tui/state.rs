@@ -115,7 +115,7 @@ impl SettingsCategory {
 
     pub fn row_count(self) -> usize {
         match self {
-            Self::General => 4,
+            Self::General => 3,
             Self::ContentModes => 3,
             Self::Appearance => 1,
             Self::StorageInfo => 5,

@@ -202,7 +202,7 @@ async fn test_settings_mouse_tab_and_row_clicks() {
     assert_eq!(cat_maint, Some(SettingsCategory::StorageInfo));
 
     let (_, rows) = settings_row_rects(popup, SettingsCategory::General, 0, 0);
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 3);
     assert_eq!(
         settings_row_at(
             popup,
@@ -246,17 +246,6 @@ async fn test_settings_mouse_tab_and_row_clicks() {
             rows[2].y
         ),
         Some(2)
-    );
-    assert_eq!(
-        settings_row_at(
-            popup,
-            SettingsCategory::General,
-            0,
-            0,
-            rows[3].x + 2,
-            rows[3].y
-        ),
-        Some(3)
     );
 }
 
@@ -369,14 +358,19 @@ async fn test_settings_toonworld_cookie_is_saved_shown_cancelled_and_cleared() {
 
     let mut app = App::new();
     app.handle_action(Action::ToggleSettingsPopup).await;
-    for _ in 0..3 {
-        app.handle_action(Action::Key(KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::empty(),
-        )))
+    app.handle_action(Action::SelectSettingsCategory(SettingsCategory::EnvVars))
         .await;
-    }
-    assert_eq!(app.state().settings_selected_row, 3);
+    let row = moviebox_tui::env_vars::SPECS
+        .iter()
+        .position(|spec| spec.name == "MOVIEBOX_TOONWORLD_COOKIE")
+        .expect("cookie row in Env Variables");
+    // Up from the first row wraps to the last, where the cookie row is.
+    app.handle_action(Action::Key(KeyEvent::new(
+        KeyCode::Up,
+        KeyModifiers::empty(),
+    )))
+    .await;
+    assert_eq!(app.state().settings_selected_row, row);
 
     // Esc abandons an edit without saving anything.
     app.handle_action(Action::SettingsActivateRow).await;
