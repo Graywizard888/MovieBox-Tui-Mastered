@@ -35,6 +35,12 @@ pub fn seek_emulation_limit() -> Option<u64> {
     }
 }
 
+/// Whether the seek proxy would fake ranges for a file of this size. Unknown sizes are tried:
+/// the proxy decides from the origin's answer and relays the file untouched when it is too big.
+pub fn seek_emulation_applies(total: Option<u64>) -> bool {
+    seek_emulation_limit().is_some_and(|limit| total.is_none_or(|total| total <= limit))
+}
+
 type CachedSegment = (String, String, Arc<[u8]>);
 type CachedManifest = (String, Arc<[u8]>);
 

@@ -572,17 +572,18 @@ async fn preflight(
 ) -> Result<Url, ProviderError> {
     preflight_seekable(client, url, mirror, intent)
         .await
-        .map(|(url, _)| url)
+        .map(|(url, _, _)| url)
 }
 
 /// Like [`preflight`], but also reports whether the host honoured the byte-range
-/// request (`206 Partial Content`). Players can only seek mid-stream on hosts that do.
+/// request (`206 Partial Content`) and the file size when the host gave it. Players can only
+/// seek mid-stream on hosts that do.
 async fn preflight_seekable(
     client: &reqwest::Client,
     url: &Url,
     mirror: &SourceMirror,
     intent: ResolutionIntent,
-) -> Result<(Url, bool), ProviderError> {
+) -> Result<(Url, bool, Option<u64>), ProviderError> {
     site::safe_url(url.as_str())?;
     if matches!(intent, ResolutionIntent::Download)
         && (url.path().ends_with(".m3u8") || url.path().ends_with(".mpd"))
@@ -608,6 +609,7 @@ async fn preflight_seekable(
         || response
             .headers()
             .contains_key(reqwest::header::CONTENT_RANGE);
+    let total = file_size(&response);
     if final_url.path().to_ascii_lowercase().ends_with(".zip") {
         return Err(ProviderError::Unavailable(
             "Not a playable media file".into(),
@@ -678,7 +680,35 @@ async fn preflight_seekable(
             "Mirror is not a media file".into(),
         ));
     }
-    Ok((final_url, seekable))
+    Ok((final_url, seekable, total))
+}
+
+/// Whole-file size from a ranged probe: the `/total` of `Content-Range`, or the length of a
+/// plain `200` that ignored the range.
+fn file_size(response: &reqwest::Response) -> Option<u64> {
+    if let Some(range) = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        return range.rsplit('/').next()?.trim().parse().ok();
+    }
+    (response.status() == reqwest::StatusCode::OK)
+        .then(|| response.content_length())
+        .flatten()
+}
+
+/// What playback should be told about seeking. `Some(false)` asks for the local seek proxy,
+/// which only helps files it is allowed to emulate; for larger files it would just relay the
+/// stream, so the player gets the link directly (`None`).
+fn playback_seekable(seekable: bool, total: Option<u64>) -> Option<bool> {
+    if seekable {
+        Some(true)
+    } else if crate::proxy::seek_emulation_applies(total) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 pub(super) async fn resolve_release(
@@ -695,7 +725,7 @@ pub(super) async fn resolve_release(
     let mut verification_error = None;
     for mirror in release.mirrors.iter().take(8) {
         match resolve_mirror(client, mirror, intent).await {
-            Ok((url, label, seekable)) => {
+            Ok((url, label, seekable, total)) => {
                 let mut headers = mirror.headers.clone();
                 if !headers
                     .iter()
@@ -713,7 +743,10 @@ pub(super) async fn resolve_release(
                     subtitle: None,
                     source_label: format!("{} • {label}", provider.label()),
                     max_height: release.quality.as_ref().map(|_| release.resolution_u64()),
-                    seekable: matches!(intent, ResolutionIntent::Playback).then_some(seekable),
+                    seekable: match intent {
+                        ResolutionIntent::Playback => playback_seekable(seekable, total),
+                        ResolutionIntent::Download => None,
+                    },
                 });
             }
             Err(error) => {
@@ -735,14 +768,14 @@ pub(super) async fn resolve_release(
 /// one the host lets players seek in, remembering the first non-seekable link as a fallback.
 fn accept_media(
     intent: ResolutionIntent,
-    (media, seekable): (Url, bool),
+    (media, seekable, total): (Url, bool, Option<u64>),
     label: &str,
-    fallback: &mut Option<(Url, String)>,
-) -> Option<(Url, String, bool)> {
+    fallback: &mut Option<(Url, String, Option<u64>)>,
+) -> Option<(Url, String, bool, Option<u64>)> {
     if seekable || matches!(intent, ResolutionIntent::Download) {
-        return Some((media, label.to_string(), seekable));
+        return Some((media, label.to_string(), seekable, total));
     }
-    fallback.get_or_insert_with(|| (media, label.to_string()));
+    fallback.get_or_insert_with(|| (media, label.to_string(), total));
     None
 }
 
@@ -750,7 +783,7 @@ async fn resolve_mirror(
     client: &reqwest::Client,
     mirror: &SourceMirror,
     intent: ResolutionIntent,
-) -> Result<(Url, String, bool), ProviderError> {
+) -> Result<(Url, String, bool, Option<u64>), ProviderError> {
     let start = site::safe_url(&mirror.resolver_url)?;
     let mut pending = VecDeque::from([(start, 0_usize, mirror.label.clone())]);
     let mut visited = HashSet::new();
@@ -907,8 +940,8 @@ async fn resolve_mirror(
         }
         pending.extend(deferred);
     }
-    if let Some((media, label)) = fallback {
-        return Ok((media, label, false));
+    if let Some((media, label, total)) = fallback {
+        return Ok((media, label, false, total));
     }
     Err(verification_error
         .unwrap_or_else(|| ProviderError::Unavailable("No direct media URL found".into())))
@@ -927,15 +960,15 @@ mod tests {
         assert!(
             accept_media(
                 ResolutionIntent::Playback,
-                (instant.clone(), false),
+                (instant.clone(), false, Some(1)),
                 "Instant",
                 &mut fallback
             )
             .is_none()
         );
-        let (url, label, seekable) = accept_media(
+        let (url, label, seekable, _) = accept_media(
             ResolutionIntent::Playback,
-            (worker.clone(), true),
+            (worker.clone(), true, None),
             "Resume Cloud",
             &mut fallback,
         )
@@ -944,19 +977,32 @@ mod tests {
             (url, label.as_str(), seekable),
             (worker, "Resume Cloud", true)
         );
-        assert_eq!(fallback, Some((instant.clone(), "Instant".to_string())));
+        assert_eq!(
+            fallback,
+            Some((instant.clone(), "Instant".to_string(), Some(1)))
+        );
 
         // Downloads never wait: the first working link wins whatever its range support.
         let mut none = None;
-        let (url, _, seekable) = accept_media(
+        let (url, _, seekable, _) = accept_media(
             ResolutionIntent::Download,
-            (instant.clone(), false),
+            (instant.clone(), false, None),
             "Instant",
             &mut none,
         )
         .unwrap();
         assert_eq!((url, seekable), (instant, false));
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn only_files_the_seek_proxy_can_emulate_are_sent_through_it() {
+        let limit = crate::proxy::DEFAULT_SEEK_EMULATION_MAX_BYTES;
+        assert_eq!(playback_seekable(true, Some(limit * 2)), Some(true));
+        assert_eq!(playback_seekable(false, Some(limit)), Some(false));
+        assert_eq!(playback_seekable(false, None), Some(false));
+        // A 3.9 GB Google "Instant" file is above the limit: the player gets it directly.
+        assert_eq!(playback_seekable(false, Some(limit + 1)), None);
     }
 
     #[test]
