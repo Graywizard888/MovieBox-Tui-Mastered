@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.6]
 
 ### Removed
 - Releases are published only on GitHub Releases. The Crates.io publish workflow, the Homebrew formula (`Formula/`), the Scoop manifest (`bucket/`) and the workflow that updated them are gone, and the install docs (README, translations, `docs/installation.md`) no longer mention them; install with the `install.sh` / `install.ps1` one-liners, a manual download from Releases, or `cargo install --git`.
