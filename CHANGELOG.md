@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Env Variables tab in Settings** (after Maintenance): lists every `MOVIEBOX_*` variable the app reads and saves the values to `env_vars` in the config folder, so they no longer have to be exported each time. A value set in the shell or on the command line wins for that run, shows as `shell: …`, and is never saved. Variables read on every use (seek proxy, player paths) apply at once; the rest are marked as applying after a restart. `MOVIEBOX_CONFIG_DIR` is not listed.
+
+### Changed
+- The ToonWorld cookie moved from General to the Env Variables tab (`TOONWORLD_COOKIE` row). It keeps its own owner-only file, its age and expiry hint, and `d` still clears it.
+- UHDMovies / Moviesmod files larger than `MOVIEBOX_SEEK_PROXY_MAX_MB` (default 3000) go to the player directly instead of being relayed through the seek proxy, which could not make them seekable anyway.
+
+### Fixed
+- **StreamX (FFmpeg 8+) closing right after opening some UHDMovies / Moviesmod files**: the seek proxy's refusal of a slow end-of-file read looked like a 0-byte file to FFmpeg 8 and newer, so playback ended at once. The refusal no longer carries a length. Desktop mpv/VLC (FFmpeg 6.1) were not affected.
+- Series sizes labelled per episode (e.g. `[ 6 GB/E ] [ 69 GB ZIP ]`) now show the episode size instead of the season-pack size.
+
 ## [1.0.6] - 2026-10-08
 
 ### Removed
