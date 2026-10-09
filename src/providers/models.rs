@@ -520,8 +520,12 @@ pub fn parse_size_bytes(text: &str) -> Option<u64> {
         if let Ok(num) = clean.parse::<f64>()
             && i + 1 < parts.len()
         {
-            let unit = parts[i + 1]
-                .trim_matches(|c: char| !c.is_ascii_alphabetic())
+            // Only the leading letters are the unit: series posts write "6 GB/E" (per episode).
+            let unit: String = parts[i + 1]
+                .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+                .chars()
+                .take_while(char::is_ascii_alphabetic)
+                .collect::<String>()
                 .to_ascii_uppercase();
             match unit.as_str() {
                 "TB" | "TIB" | "T" => return Some((num * 1_099_511_627_776.0) as u64),
@@ -531,7 +535,11 @@ pub fn parse_size_bytes(text: &str) -> Option<u64> {
                 _ => {}
             }
         }
-        let upper = clean.to_ascii_uppercase();
+        let compact = clean
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+            .next()
+            .unwrap_or_default();
+        let upper = compact.to_ascii_uppercase();
         for (suffix, multiplier) in [
             ("TIB", 1_099_511_627_776.0),
             ("TB", 1_099_511_627_776.0),
@@ -658,6 +666,16 @@ mod tests {
         assert_eq!(parse_size_bytes("450MB"), Some(471_859_200));
         assert_eq!(parse_size_bytes("512 KB"), Some(524_288));
         assert_eq!(parse_size_bytes("1 TB"), Some(1_099_511_627_776));
+        // Per-episode sizes come before the season-pack size and must win over it.
+        assert_eq!(
+            parse_size_bytes("WEB-DL [ 6 GB/E ] [ 69 GB ZIP ]"),
+            Some(6 * 1_073_741_824)
+        );
+        assert_eq!(
+            parse_size_bytes("[6GB/E] [69GB ZIP]"),
+            Some(6 * 1_073_741_824)
+        );
+        assert_eq!(parse_size_bytes("Terminator 6 Movies Collection"), None);
         assert_eq!(parse_size_bytes("💾 2.25 GB ⚡"), Some(2_415_919_104));
         assert_eq!(parse_size_bytes("No size here"), None);
         assert_eq!(parse_size_bytes(""), None);
