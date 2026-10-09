@@ -12,7 +12,11 @@ const MAX_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_MANIFEST_BYTES: usize = 10 * 1024 * 1024;
 const CHUNK_IDLE_TIMEOUT_SECS: u64 = 60;
-const WATCHDOG_IDLE_SECS: u64 = 600;
+/// How long the proxy lingers with no player connected before it exits. A paused player keeps
+/// its connection, so only a player that has gone brings the proxy down; the allowance covers a
+/// player reopening its connection after a seek.
+const WATCHDOG_IDLE_SECS: u64 = 15;
+const WATCHDOG_POLL_SECS: u64 = 5;
 const DASH_RANGE_CHUNK_BYTES: usize = 95 * 1024;
 const MAX_CACHED_SEGMENTS: usize = 24;
 const MAX_SEGMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -330,6 +334,10 @@ pub fn retain_android_sidecar(child: std::process::Child) {
     }
 }
 
+fn watchdog_should_exit(connections: usize, idle: Duration) -> bool {
+    connections == 0 && idle > Duration::from_secs(WATCHDOG_IDLE_SECS)
+}
+
 pub fn spawn_sidecar(
     target_url: &str,
     headers: &[(String, String)],
@@ -440,13 +448,13 @@ pub async fn run_sidecar(
     let watchdog_activity = Arc::clone(&last_activity);
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(15)).await;
+            tokio::time::sleep(Duration::from_secs(WATCHDOG_POLL_SECS)).await;
             let conns = watchdog_conns.load(Ordering::Relaxed);
             let elapsed = {
                 let lock = watchdog_activity.lock().unwrap();
                 lock.elapsed()
             };
-            if conns == 0 && elapsed > Duration::from_secs(WATCHDOG_IDLE_SECS) {
+            if watchdog_should_exit(conns, elapsed) {
                 std::process::exit(0);
             }
         }
@@ -2307,6 +2315,16 @@ mod tests {
         assert_eq!(res.status(), 200);
         assert!(res.headers().get("accept-ranges").is_none());
         assert_eq!(res.bytes().await.unwrap().len(), payload.len());
+    }
+
+    #[test]
+    fn the_proxy_exits_only_when_no_player_is_connected_and_it_has_been_idle() {
+        let long = Duration::from_secs(WATCHDOG_IDLE_SECS + 1);
+        // A paused player keeps its connection open, however long it pauses.
+        assert!(!watchdog_should_exit(1, Duration::from_secs(3600)));
+        // A player that reconnects right after a seek is not given up on.
+        assert!(!watchdog_should_exit(0, Duration::from_secs(1)));
+        assert!(watchdog_should_exit(0, long));
     }
 
     #[tokio::test]
