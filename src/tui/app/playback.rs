@@ -405,7 +405,13 @@ impl App {
                     seek_limit,
                 ) {
                     Ok((local_url, sc_child)) => {
-                        sidecar_child = Some(sc_child);
+                        if matches!(kind, crate::tui::state::PlayerKind::AndroidIntent) {
+                            // The intent returns at once and the player outlives this task, so
+                            // the proxy is kept until the next one replaces it.
+                            crate::proxy::retain_android_sidecar(sc_child);
+                        } else {
+                            sidecar_child = Some(sc_child);
+                        }
                         let sub_url =
                             if matches!(kind, crate::tui::state::PlayerKind::AndroidIntent) {
                                 if local_subtitle.is_some() {

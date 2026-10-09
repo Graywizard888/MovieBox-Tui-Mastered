@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Seek proxy kept downloading after the player left**: while the proxy skipped ahead to a seek target nothing was written to the player, so a player that exited mid-seek went unnoticed and the skip carried on downloading for nobody (stuck background traffic, a long black screen on the next video, and a process that survived closing MovieBox). The proxy now notices the player closing and stops at once.
+- **Android: one proxy process left behind per video** (the phone heated up after two or three videos). Starting a video now stops the proxy of the previous one, and a proxy whose player has gone exits after about 15 seconds (was 10 minutes). A paused player keeps its connection, so a long pause is unaffected.
+
 ## [1.0.7] - 2026-10-09
 
 ### Added
