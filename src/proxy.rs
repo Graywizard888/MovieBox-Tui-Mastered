@@ -12,11 +12,13 @@ const MAX_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_MANIFEST_BYTES: usize = 10 * 1024 * 1024;
 const CHUNK_IDLE_TIMEOUT_SECS: u64 = 60;
-/// How long the proxy lingers with no player connected before it exits. A paused player keeps
+/// How long the proxy lingers after its last player connection closes. A paused player keeps
 /// its connection, so only a player that has gone brings the proxy down; the allowance covers a
 /// player reopening its connection after a seek.
-const WATCHDOG_IDLE_SECS: u64 = 2;
-const WATCHDOG_POLL_SECS: u64 = 1;
+const PLAYER_GONE_GRACE: Duration = Duration::from_secs(2);
+/// How long a new proxy waits for the player's first connection (starting the player app can
+/// take a while) before giving up.
+const PLAYER_STARTUP_GRACE: Duration = Duration::from_secs(120);
 const DASH_RANGE_CHUNK_BYTES: usize = 95 * 1024;
 const MAX_CACHED_SEGMENTS: usize = 24;
 const MAX_SEGMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -305,60 +307,119 @@ struct ProxyContext {
     manifest_cache: Arc<Mutex<Option<CachedManifest>>>,
     seek: Option<Arc<SeekEmulation>>,
 }
-struct ConnectionGuard {
-    conns: Arc<AtomicUsize>,
-    activity: Arc<Mutex<Instant>>,
+/// Tracks the player's connections so the proxy can exit once the player is gone, without
+/// polling: the watcher sleeps until a connection opens or closes and reacts to that.
+struct IdleWatch {
+    conns: AtomicUsize,
+    ever_connected: std::sync::atomic::AtomicBool,
+    last_activity: Mutex<Instant>,
+    changed: tokio::sync::Notify,
 }
 
-impl Drop for ConnectionGuard {
-    fn drop(&mut self) {
-        self.conns.fetch_sub(1, Ordering::Relaxed);
-        if let Ok(mut lock) = self.activity.lock() {
+impl IdleWatch {
+    fn new() -> Self {
+        Self {
+            conns: AtomicUsize::new(0),
+            ever_connected: std::sync::atomic::AtomicBool::new(false),
+            last_activity: Mutex::new(Instant::now()),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn touch(&self) {
+        if let Ok(mut lock) = self.last_activity.lock() {
             *lock = Instant::now();
         }
     }
+
+    fn connection_opened(&self) {
+        self.conns.fetch_add(1, Ordering::SeqCst);
+        self.ever_connected.store(true, Ordering::SeqCst);
+        self.touch();
+        self.changed.notify_one();
+    }
+
+    fn connection_closed(&self) {
+        self.touch();
+        self.conns.fetch_sub(1, Ordering::SeqCst);
+        self.changed.notify_one();
+    }
+
+    /// Resolves once no player has been connected for `gone_grace` (or for `startup_grace` when
+    /// no player has connected yet). While a connection is open, playing or paused, it sleeps.
+    async fn wait_until_abandoned(&self, startup_grace: Duration, gone_grace: Duration) {
+        loop {
+            if self.conns.load(Ordering::SeqCst) > 0 {
+                self.changed.notified().await;
+                continue;
+            }
+            let grace = if self.ever_connected.load(Ordering::SeqCst) {
+                gone_grace
+            } else {
+                startup_grace
+            };
+            let idle = self
+                .last_activity
+                .lock()
+                .map(|lock| lock.elapsed())
+                .unwrap_or(grace);
+            if idle >= grace {
+                return;
+            }
+            // A connection opening or closing meanwhile changes the answer, so wake for it too.
+            tokio::select! {
+                () = tokio::time::sleep(grace - idle) => {}
+                () = self.changed.notified() => {}
+            }
+        }
+    }
 }
 
-static ANDROID_SIDECAR: std::sync::Mutex<Option<(u64, std::process::Child)>> =
-    std::sync::Mutex::new(None);
+struct ConnectionGuard(Arc<IdleWatch>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.connection_closed();
+    }
+}
+
+/// The proxy of the video being watched on Android: (generation, process id).
+static ANDROID_SIDECAR: std::sync::Mutex<Option<(u64, u32)>> = std::sync::Mutex::new(None);
 static ANDROID_SIDECAR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const SIDECAR_REAP_POLL: Duration = Duration::from_secs(1);
+
+#[cfg(unix)]
+fn kill_process(pid: u32) {
+    // SAFETY: plain signal to a process id taken from a child this module spawned.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process(_pid: u32) {}
 
 /// Keeps the proxy of the video being watched on Android and stops the one of the video before
 /// it. The player there is started through an intent, so nothing else would stop the old proxy.
-/// A proxy that exits on its own (nobody connected for a while) is reaped here too, so it does
-/// not linger as a defunct process until the next video.
-pub fn retain_android_sidecar(child: std::process::Child) {
+/// A thread blocks until the proxy exits, however it ends (it stops itself once the player is
+/// gone), and collects it so it does not linger as a defunct process.
+pub fn retain_android_sidecar(mut child: std::process::Child) {
     let id = ANDROID_SIDECAR_ID.fetch_add(1, Ordering::Relaxed);
-    let previous = ANDROID_SIDECAR
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.replace((id, child)));
-    if let Some((_, mut previous)) = previous {
-        let _ = previous.kill();
-        let _ = previous.wait();
+    let pid = child.id();
+    if let Ok(mut slot) = ANDROID_SIDECAR.lock() {
+        // The previous proxy is still in the slot only while its thread has not collected it,
+        // so the id cannot belong to an unrelated process.
+        if let Some((_, previous)) = slot.replace((id, pid)) {
+            kill_process(previous);
+        }
     }
     std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(SIDECAR_REAP_POLL);
-            let Ok(mut slot) = ANDROID_SIDECAR.lock() else {
-                return;
-            };
-            match slot.as_mut() {
-                Some((current, child)) if *current == id => {
-                    if !matches!(child.try_wait(), Ok(None)) {
-                        *slot = None;
-                        return;
-                    }
-                }
-                _ => return,
-            }
+        let _ = child.wait();
+        if let Ok(mut slot) = ANDROID_SIDECAR.lock()
+            && slot.is_some_and(|(current, _)| current == id)
+        {
+            *slot = None;
         }
     });
-}
-
-fn watchdog_should_exit(connections: usize, idle: Duration) -> bool {
-    connections == 0 && idle > Duration::from_secs(WATCHDOG_IDLE_SECS)
 }
 
 pub fn spawn_sidecar(
@@ -464,23 +525,14 @@ pub async fn run_sidecar(
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    let active_connections = Arc::new(AtomicUsize::new(0));
-    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let idle_watch = Arc::new(IdleWatch::new());
 
-    let watchdog_conns = Arc::clone(&active_connections);
-    let watchdog_activity = Arc::clone(&last_activity);
+    let watchdog = Arc::clone(&idle_watch);
     tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(WATCHDOG_POLL_SECS)).await;
-            let conns = watchdog_conns.load(Ordering::Relaxed);
-            let elapsed = {
-                let lock = watchdog_activity.lock().unwrap();
-                lock.elapsed()
-            };
-            if watchdog_should_exit(conns, elapsed) {
-                std::process::exit(0);
-            }
-        }
+        watchdog
+            .wait_until_abandoned(PLAYER_STARTUP_GRACE, PLAYER_GONE_GRACE)
+            .await;
+        std::process::exit(0);
     });
 
     let ctx = ProxyContext {
@@ -517,21 +569,11 @@ pub async fn run_sidecar(
             }
         };
         let conn_ctx = ctx.clone();
-        let active_conns = Arc::clone(&active_connections);
-        let activity = Arc::clone(&last_activity);
-
-        active_conns.fetch_add(1, Ordering::Relaxed);
-        {
-            if let Ok(mut lock) = activity.lock() {
-                *lock = Instant::now();
-            }
-        }
+        idle_watch.connection_opened();
+        let guard = ConnectionGuard(Arc::clone(&idle_watch));
 
         tokio::spawn(async move {
-            let _guard = ConnectionGuard {
-                conns: active_conns,
-                activity,
-            };
+            let _guard = guard;
             let _ = handle_connection(stream, &conn_ctx).await;
         });
     }
@@ -2341,32 +2383,168 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        // SAFETY: signal 0 only checks that the process id exists.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(done(), "{what}");
+    }
+
+    // One test: the Android proxy slot is process-wide, so the steps must not run in parallel.
+    #[cfg(unix)]
     #[test]
-    fn a_proxy_that_exits_on_its_own_is_reaped() {
+    fn android_proxy_is_collected_when_it_exits_and_replaced_by_the_next_one() {
+        // A proxy that exits on its own is collected, not left defunct.
         let child = std::process::Command::new("sh")
             .args(["-c", "exit 0"])
             .spawn()
             .unwrap();
-        let pid = child.id();
+        let exited = child.id();
         retain_android_sidecar(child);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while ANDROID_SIDECAR.lock().unwrap().is_some() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(
-            ANDROID_SIDECAR.lock().unwrap().is_none(),
-            "the exited proxy {pid} was never reaped"
+        wait_until("the exited proxy was never collected", || {
+            ANDROID_SIDECAR.lock().unwrap().is_none() && !process_exists(exited)
+        });
+
+        // Starting the next video stops the previous proxy and collects it.
+        let first = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let first_pid = first.id();
+        retain_android_sidecar(first);
+        assert!(process_exists(first_pid));
+        let second = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let second_pid = second.id();
+        retain_android_sidecar(second);
+        wait_until("the previous proxy was not stopped", || {
+            !process_exists(first_pid)
+        });
+        assert!(process_exists(second_pid));
+        assert_eq!(
+            ANDROID_SIDECAR.lock().unwrap().map(|(_, pid)| pid),
+            Some(second_pid)
         );
+
+        // Clean up the last one.
+        kill_process(second_pid);
+        wait_until("the last proxy was not collected", || {
+            ANDROID_SIDECAR.lock().unwrap().is_none()
+        });
     }
 
-    #[test]
-    fn the_proxy_exits_only_when_no_player_is_connected_and_it_has_been_idle() {
-        let long = Duration::from_secs(WATCHDOG_IDLE_SECS + 1);
+    #[tokio::test]
+    async fn the_proxy_waits_for_a_player_that_is_slow_to_connect_then_gives_up() {
+        let watch = IdleWatch::new();
+        let (startup, gone) = (Duration::from_millis(400), Duration::from_millis(50));
+        // Still within the startup allowance: not abandoned yet, even though the short
+        // allowance for a departed player has long passed.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                watch.wait_until_abandoned(startup, gone)
+            )
+            .await
+            .is_err()
+        );
+        // Nobody ever connected: abandoned once the startup allowance is over.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            watch.wait_until_abandoned(startup, gone),
+        )
+        .await
+        .expect("an unused proxy should give up");
+    }
+
+    #[tokio::test]
+    async fn the_proxy_stays_while_a_player_is_connected_and_leaves_shortly_after_it_goes() {
+        let watch = Arc::new(IdleWatch::new());
+        let (startup, gone) = (Duration::from_secs(60), Duration::from_millis(150));
+        watch.connection_opened();
         // A paused player keeps its connection open, however long it pauses.
-        assert!(!watchdog_should_exit(1, Duration::from_secs(3600)));
-        // A player that reconnects right after a seek is not given up on.
-        assert!(!watchdog_should_exit(0, Duration::from_secs(1)));
-        assert!(watchdog_should_exit(0, long));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                watch.wait_until_abandoned(startup, gone)
+            )
+            .await
+            .is_err()
+        );
+        // A second connection (a seek) opens before the first closes.
+        watch.connection_opened();
+        watch.connection_closed();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(400),
+                watch.wait_until_abandoned(startup, gone)
+            )
+            .await
+            .is_err()
+        );
+        // The last connection closes: the proxy leaves after the short allowance.
+        let waiter = tokio::spawn({
+            let watch = Arc::clone(&watch);
+            async move { watch.wait_until_abandoned(startup, gone).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let closed_at = Instant::now();
+        watch.connection_closed();
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("the proxy should leave once the player is gone")
+            .unwrap();
+        assert!(closed_at.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn a_player_that_connects_and_leaves_while_the_proxy_waits_for_it_is_noticed() {
+        let watch = Arc::new(IdleWatch::new());
+        // The long startup allowance is already running when the player comes and goes.
+        let waiter = tokio::spawn({
+            let watch = Arc::clone(&watch);
+            async move {
+                watch
+                    .wait_until_abandoned(Duration::from_secs(60), Duration::from_millis(150))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        watch.connection_opened();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        watch.connection_closed();
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("the proxy kept waiting out the startup allowance")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_player_that_reconnects_within_the_allowance_keeps_the_proxy() {
+        let watch = Arc::new(IdleWatch::new());
+        let (startup, gone) = (Duration::from_secs(60), Duration::from_millis(400));
+        watch.connection_opened();
+        let waiter = tokio::spawn({
+            let watch = Arc::clone(&watch);
+            async move { watch.wait_until_abandoned(startup, gone).await }
+        });
+        watch.connection_closed();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        watch.connection_opened();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a reconnecting player was given up on"
+        );
+        waiter.abort();
     }
 
     #[tokio::test]
