@@ -15,8 +15,8 @@ const CHUNK_IDLE_TIMEOUT_SECS: u64 = 60;
 /// How long the proxy lingers with no player connected before it exits. A paused player keeps
 /// its connection, so only a player that has gone brings the proxy down; the allowance covers a
 /// player reopening its connection after a seek.
-const WATCHDOG_IDLE_SECS: u64 = 15;
-const WATCHDOG_POLL_SECS: u64 = 5;
+const WATCHDOG_IDLE_SECS: u64 = 2;
+const WATCHDOG_POLL_SECS: u64 = 1;
 const DASH_RANGE_CHUNK_BYTES: usize = 95 * 1024;
 const MAX_CACHED_SEGMENTS: usize = 24;
 const MAX_SEGMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -322,7 +322,7 @@ impl Drop for ConnectionGuard {
 static ANDROID_SIDECAR: std::sync::Mutex<Option<(u64, std::process::Child)>> =
     std::sync::Mutex::new(None);
 static ANDROID_SIDECAR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const SIDECAR_REAP_POLL: Duration = Duration::from_secs(2);
+const SIDECAR_REAP_POLL: Duration = Duration::from_secs(1);
 
 /// Keeps the proxy of the video being watched on Android and stops the one of the video before
 /// it. The player there is started through an intent, so nothing else would stop the old proxy.

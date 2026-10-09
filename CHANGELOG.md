@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
-- Android: a proxy that exited on its own (a few seconds after the player closed) stayed in the process list as `<defunct>` until the next video was started. It is now cleaned up within a couple of seconds.
+- Android: the proxy now exits 2 seconds after the player's connection is gone (was about 15 s); a paused player keeps its connection, so a pause is unaffected.
+- Android: a proxy that exited on its own (a few seconds after the player closed) stayed in the process list as `<defunct>` until the next video was started. It is now cleaned up within a second or two.
 
 ## [1.0.8] - 2026-10-09
 
