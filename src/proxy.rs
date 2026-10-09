@@ -319,19 +319,42 @@ impl Drop for ConnectionGuard {
     }
 }
 
-static ANDROID_SIDECAR: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+static ANDROID_SIDECAR: std::sync::Mutex<Option<(u64, std::process::Child)>> =
+    std::sync::Mutex::new(None);
+static ANDROID_SIDECAR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const SIDECAR_REAP_POLL: Duration = Duration::from_secs(2);
 
 /// Keeps the proxy of the video being watched on Android and stops the one of the video before
 /// it. The player there is started through an intent, so nothing else would stop the old proxy.
+/// A proxy that exits on its own (nobody connected for a while) is reaped here too, so it does
+/// not linger as a defunct process until the next video.
 pub fn retain_android_sidecar(child: std::process::Child) {
+    let id = ANDROID_SIDECAR_ID.fetch_add(1, Ordering::Relaxed);
     let previous = ANDROID_SIDECAR
         .lock()
         .ok()
-        .and_then(|mut slot| slot.replace(child));
-    if let Some(mut previous) = previous {
+        .and_then(|mut slot| slot.replace((id, child)));
+    if let Some((_, mut previous)) = previous {
         let _ = previous.kill();
         let _ = previous.wait();
     }
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(SIDECAR_REAP_POLL);
+            let Ok(mut slot) = ANDROID_SIDECAR.lock() else {
+                return;
+            };
+            match slot.as_mut() {
+                Some((current, child)) if *current == id => {
+                    if !matches!(child.try_wait(), Ok(None)) {
+                        *slot = None;
+                        return;
+                    }
+                }
+                _ => return,
+            }
+        }
+    });
 }
 
 fn watchdog_should_exit(connections: usize, idle: Duration) -> bool {
@@ -2315,6 +2338,25 @@ mod tests {
         assert_eq!(res.status(), 200);
         assert!(res.headers().get("accept-ranges").is_none());
         assert_eq!(res.bytes().await.unwrap().len(), payload.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_proxy_that_exits_on_its_own_is_reaped() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        retain_android_sidecar(child);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ANDROID_SIDECAR.lock().unwrap().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            ANDROID_SIDECAR.lock().unwrap().is_none(),
+            "the exited proxy {pid} was never reaped"
+        );
     }
 
     #[test]

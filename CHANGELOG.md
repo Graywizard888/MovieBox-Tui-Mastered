@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Android: a proxy that exited on its own (a few seconds after the player closed) stayed in the process list as `<defunct>` until the next video was started. It is now cleaned up within a couple of seconds.
+
 ## [1.0.8] - 2026-10-09
 
 ### Fixed
