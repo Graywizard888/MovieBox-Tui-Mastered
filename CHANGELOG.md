@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-10-09
+
 ### Added
 - **Env Variables tab in Settings** (after Maintenance): lists every `MOVIEBOX_*` variable the app reads and saves the values to `env_vars` in the config folder, so they no longer have to be exported each time. A value set in the shell or on the command line wins for that run, shows as `shell: …`, and is never saved. Variables read on every use (seek proxy, player paths) apply at once; the rest are marked as applying after a restart. `MOVIEBOX_CONFIG_DIR` is not listed.
 
