@@ -12,7 +12,7 @@ const MAX_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_MANIFEST_BYTES: usize = 10 * 1024 * 1024;
 const CHUNK_IDLE_TIMEOUT_SECS: u64 = 60;
-const WATCHDOG_IDLE_SECS: u64 = 600;
+const WATCHDOG_IDLE_SECS: u64 = 120;
 const DASH_RANGE_CHUNK_BYTES: usize = 95 * 1024;
 const MAX_CACHED_SEGMENTS: usize = 24;
 const MAX_SEGMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -312,6 +312,21 @@ impl Drop for ConnectionGuard {
         if let Ok(mut lock) = self.activity.lock() {
             *lock = Instant::now();
         }
+    }
+}
+
+static ANDROID_SIDECAR: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Keeps the proxy of the video being watched on Android and stops the one of the video before
+/// it. The player there is started through an intent, so nothing else would stop the old proxy.
+pub fn retain_android_sidecar(child: std::process::Child) {
+    let previous = ANDROID_SIDECAR
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.replace(child));
+    if let Some(mut previous) = previous {
+        let _ = previous.kill();
+        let _ = previous.wait();
     }
 }
 
@@ -703,6 +718,7 @@ async fn handle_connection(
                 &target_url,
                 range_header.as_deref(),
                 client_close,
+                &mut std::pin::pin!(client_gone(&mut buf_reader)),
             )
             .await?
         {
@@ -874,6 +890,16 @@ fn resolve_range(header: Option<&str>, total: u64) -> Result<(u64, u64), ()> {
     Ok((start, end))
 }
 
+/// Resolves when the player closes its end of the connection. Nothing is read from it, so a
+/// player that sent more bytes (a pipelined request) is simply never reported as gone.
+async fn client_gone<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) {
+    use tokio::io::AsyncBufReadExt;
+    match reader.fill_buf().await {
+        Ok(buf) if !buf.is_empty() => std::future::pending().await,
+        _ => {}
+    }
+}
+
 /// Writes the part of `chunk` (the next bytes of the file, starting at `up.pos`) that falls in
 /// `start + sent..start + length`, and keeps whatever is left over for the next request.
 async fn consume_chunk<W: AsyncWriteExt + Unpin>(
@@ -909,13 +935,14 @@ async fn consume_chunk<W: AsyncWriteExt + Unpin>(
 
 /// Streams bytes `start..start + length` of the file to the player. `up` must not have read
 /// past `start`; everything before it is discarded. `sent` counts body bytes written.
-async fn pump_range<W: AsyncWriteExt + Unpin>(
+async fn pump_range<W: AsyncWriteExt + Unpin, G: std::future::Future<Output = ()> + Unpin>(
     writer: &mut W,
     seek: &SeekEmulation,
     up: &mut UpstreamStream,
     start: u64,
     length: u64,
     sent: &mut u64,
+    gone: &mut G,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let began = Instant::now();
     let mut received = 0u64;
@@ -928,9 +955,15 @@ async fn pump_range<W: AsyncWriteExt + Unpin>(
             written?;
             continue;
         }
-        let next =
-            tokio::time::timeout(Duration::from_secs(CHUNK_IDLE_TIMEOUT_SECS), up.res.chunk())
-                .await;
+        // While skipping to the target nothing is written, so a player that has left would go
+        // unnoticed and the skip would keep downloading for nobody.
+        let next = tokio::select! {
+            next = tokio::time::timeout(
+                Duration::from_secs(CHUNK_IDLE_TIMEOUT_SECS),
+                up.res.chunk(),
+            ) => next,
+            () = &mut *gone => return Err("player disconnected".into()),
+        };
         let chunk = match next {
             Ok(Ok(Some(chunk))) => chunk,
             Ok(Ok(None)) => {
@@ -970,7 +1003,10 @@ async fn pump_range<W: AsyncWriteExt + Unpin>(
 /// Returns `Ok(Some(keep_alive))` when it answered, or `Ok(None)` when the request should
 /// be relayed as-is (the host already supports ranges, or the file is too large to fake).
 #[allow(clippy::too_many_arguments)]
-async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
+async fn serve_seek_emulated<
+    W: AsyncWriteExt + Unpin,
+    G: std::future::Future<Output = ()> + Unpin,
+>(
     writer: &mut W,
     client: &reqwest::Client,
     auth_headers: &[(String, String)],
@@ -979,6 +1015,7 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
     target_url: &str,
     range_header: Option<&str>,
     client_close: bool,
+    gone: &mut G,
 ) -> Result<Option<bool>, Box<dyn std::error::Error + Send + Sync>> {
     let open = |range: Option<&str>| {
         let mut req = client.get(target_url);
@@ -1106,7 +1143,7 @@ async fn serve_seek_emulated<W: AsyncWriteExt + Unpin>(
             },
         };
         let _active = ActiveRequest::begin(&seek.active);
-        match pump_range(writer, seek, &mut up, start, length, &mut sent).await {
+        match pump_range(writer, seek, &mut up, start, length, &mut sent, gone).await {
             Ok(()) => {
                 park_upstream(seek, up, meta.total);
                 break;
@@ -2270,6 +2307,63 @@ mod tests {
         assert_eq!(res.status(), 200);
         assert!(res.headers().get("accept-ranges").is_none());
         assert_eq!(res.bytes().await.unwrap().len(), payload.len());
+    }
+
+    #[tokio::test]
+    async fn a_player_that_leaves_mid_skip_stops_the_download() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const TOTAL: usize = 6_000_000;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = listener.local_addr().unwrap();
+        // A host that ignores ranges and trickles the file: about 1.6 MB/s.
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {TOTAL}\r\nConnection: close\r\n\r\n"
+                    );
+                    if socket.write_all(hdr.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let block = [0u8; 16 * 1024];
+                    for _ in 0..TOTAL / block.len() {
+                        if socket.write_all(&block).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                });
+            }
+        });
+        let seek = Arc::new(SeekEmulation::new(DEFAULT_SEEK_EMULATION_MAX_BYTES));
+        let port = spawn_proxy_with(origin, Some(Arc::clone(&seek))).await;
+
+        let mut player = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let request = format!(
+            "GET /http/{origin}/movie HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=5500000-\r\n\r\n"
+        );
+        player.write_all(request.as_bytes()).await.unwrap();
+        // The proxy is now skipping 5.5 MB, which takes the host about 3.4 s.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(seek.active.load(Ordering::SeqCst), 1);
+        drop(player);
+
+        let deadline = Instant::now() + Duration::from_millis(1000);
+        while seek.active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            seek.active.load(Ordering::SeqCst),
+            0,
+            "the skip kept downloading after the player left"
+        );
     }
 
     #[tokio::test]
