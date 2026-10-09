@@ -248,7 +248,7 @@ impl App {
         state.installed_addons = crate::config::load_addons();
         crate::providers::toonworld4all::cookie::load();
 
-        let env_theme = std::env::var("MOVIEBOX_THEME")
+        let env_theme = crate::env_vars::var("MOVIEBOX_THEME")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());

@@ -160,8 +160,9 @@ pub fn addon_manager_layout(
 
 pub fn settings_modal_layout(area: Rect, category: crate::tui::state::SettingsCategory) -> Rect {
     let min_width = 44u16.min(area.width.saturating_sub(2));
-    let popup_width = 58u16.min(area.width.saturating_sub(2)).max(min_width);
-    let content_height = category.row_count() as u16;
+    // Wide enough for all five tab titles; narrower terminals get the compact titles.
+    let popup_width = 72u16.min(area.width.saturating_sub(2)).max(min_width);
+    let content_height = (category.row_count() + category.footer_height()) as u16;
     let popup_height = (content_height + 4).min(area.height.saturating_sub(2));
     let available_width = area.width.saturating_sub(2).max(1);
     let width = popup_width.min(available_width);

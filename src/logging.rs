@@ -6,7 +6,7 @@ static HOME_DIR: LazyLock<Option<String>> =
     LazyLock::new(|| dirs::home_dir().and_then(|home| home.to_str().map(|home| home.to_string())));
 pub fn init() {
     let default_level = "info";
-    let spec = std::env::var("MOVIEBOX_LOG")
+    let spec = crate::env_vars::var("MOVIEBOX_LOG")
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_level.to_string());

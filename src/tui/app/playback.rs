@@ -25,7 +25,7 @@ impl App {
             return PlaybackResolution::NoPlayersInstalled;
         }
 
-        let preferred = std::env::var(crate::player::ENV_MOVIEBOX_PLAYER)
+        let preferred = crate::env_vars::var(crate::player::ENV_MOVIEBOX_PLAYER)
             .ok()
             .and_then(|value| crate::tui::state::PlayerKind::parse(&value))
             .or_else(|| {

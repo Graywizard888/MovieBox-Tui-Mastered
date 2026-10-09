@@ -41,6 +41,12 @@ Enter `/settings` in the search bar or click `[ ⚙ Settings ]` on the Home scre
 
 ## Environment Variables
 
+Every variable below except `MOVIEBOX_CONFIG_DIR` can also be set in `/settings` → **Env Variables**: Enter edits, `d` clears, and the
+help line says whether a change applies now or after a restart. Values are saved as `NAME=value` lines
+in `env_vars` in the config directory. A value set in the shell or on the command line
+(`MOVIEBOX_SEEK_PROXY_MAX_MB=4000 moviebox-tui`) wins for that run only and is never saved; the next
+launch without it uses the Settings value again, then the built-in default.
+
 | Variable | Description |
 | :--- | :--- |
 | `MOVIEBOX_PLAYER` | Force media player (`"mpv"`, `"vlc"`, `"iina"`, `"android"`) |
@@ -62,7 +68,7 @@ Enter `/settings` in the search bar or click `[ ⚙ Settings ]` on the Home scre
 | `MOVIEBOX_TOONWORLD4ALL_PREVIOUS_ARCHIVE_URL` | Rebase archive links on an earlier archive origin |
 | `MOVIEBOX_TOONWORLD4ALL_WORKER_URL` | Override ToonWorld4All redirect worker base URL (HTTPS) |
 | `MOVIEBOX_TOONWORLD4ALL_PREVIOUS_WORKER_URL` | Rebase worker redirects on an earlier worker origin |
-| `MOVIEBOX_TOONWORLD_COOKIE` | Cookies copied from a browser that already passed the ToonWorld4All archive's 24-hour ad gate (e.g. `user=...`). Sent only to the archive's own redirect pages; never logged. Can also be pasted in Settings (General, ToonWorld Cookie), which keeps it in a private file; the variable wins when both are set. |
+| `MOVIEBOX_TOONWORLD_COOKIE` | Cookies copied from a browser that already passed the ToonWorld4All archive's 24-hour ad gate (e.g. `user=...`). Sent only to the archive's own redirect pages; never logged. Can also be pasted in Settings (Env Variables, `TOONWORLD_COOKIE`), which keeps it in its own private file with its age shown; the variable wins when both are set. |
 | `MOVIEBOX_SEEK_PROXY_MAX_MB` | Largest file (MB, default `3000`) for which UHDMovies/Moviesmod/ToonWorld4All playback fakes seeking when the host cannot seek (see Players). `0` turns it off. |
 | `MOVIEBOX_SEEK_PROXY_END_WAIT_SECS` | Longest wait (seconds, default `15`) the seek proxy accepts for a Matroska player reading the file index at the end of the file while opening it; a longer one is refused so playback starts at once. A very large value never refuses. |
 | `MOVIEBOX_NO_IMAGE` | Set to `"1"` or `"true"` to disable terminal image previews |

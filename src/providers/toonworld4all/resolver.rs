@@ -73,7 +73,7 @@ fn shortener_message(env_cookie_set: bool, saved_age: Option<u64>) -> String {
         Some(age) if !env_cookie_set && age >= cookie::COOKIE_TTL_SECS => format!(
             "Mirror requires the archive ad gate and the saved ToonWorld cookie is {}h old, so \
              its 24-hour pass has likely expired; pass the gate in a browser again and paste a \
-             fresh cookie in Settings (General > ToonWorld Cookie)",
+             fresh cookie in Settings (Env Variables > TOONWORLD_COOKIE)",
             age / 3600
         ),
         Some(age) if !env_cookie_set => format!(
@@ -83,8 +83,8 @@ fn shortener_message(env_cookie_set: bool, saved_age: Option<u64>) -> String {
             age / 3600
         ),
         _ => "Mirror requires an interactive ad shortener; solve it once in a browser and paste \
-              that browser's archive.toonworld4all.me cookies in Settings (General > ToonWorld \
-              Cookie) or set MOVIEBOX_TOONWORLD_COOKIE, or choose another mirror or quality"
+              that browser's archive.toonworld4all.me cookies in Settings (Env Variables > \
+              TOONWORLD_COOKIE) or set MOVIEBOX_TOONWORLD_COOKIE, or choose another mirror or quality"
             .to_string(),
     }
 }
@@ -540,7 +540,7 @@ mod cookie_message_tests {
     #[test]
     fn message_points_at_settings_when_nothing_is_saved() {
         let message = shortener_message(false, None);
-        assert!(message.contains("Settings (General > ToonWorld Cookie)"));
+        assert!(message.contains("Settings (Env Variables > TOONWORLD_COOKIE)"));
         assert!(message.contains("MOVIEBOX_TOONWORLD_COOKIE"));
     }
 

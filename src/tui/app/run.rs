@@ -57,7 +57,7 @@ impl App {
         {
             self.state.default_player = Some(first.config_key().to_string());
         }
-        let preferred = std::env::var(crate::player::ENV_MOVIEBOX_PLAYER)
+        let preferred = crate::env_vars::var(crate::player::ENV_MOVIEBOX_PLAYER)
             .ok()
             .and_then(|value| crate::tui::state::PlayerKind::parse(&value))
             .or_else(|| {
@@ -251,7 +251,7 @@ impl App {
     }
 
     fn forced_protocol() -> Option<ForcedProtocol> {
-        match std::env::var("MOVIEBOX_IMAGE_PROTOCOL")
+        match crate::env_vars::var("MOVIEBOX_IMAGE_PROTOCOL")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -272,7 +272,7 @@ impl App {
     }
 
     fn cell_size_override() -> Option<ratatui_image::FontSize> {
-        let raw = std::env::var("MOVIEBOX_CELL_SIZE").ok()?;
+        let raw = crate::env_vars::var("MOVIEBOX_CELL_SIZE").ok()?;
         let raw = raw.trim().to_ascii_lowercase();
         let (width, height) = raw.split_once(['x', '*'])?;
         let width: u16 = width.trim().parse().ok()?;

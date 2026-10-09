@@ -25,7 +25,7 @@ pub const DEFAULT_SEEK_EMULATION_MAX_BYTES: u64 = 3000 * 1024 * 1024;
 
 /// Size limit for seek emulation from `MOVIEBOX_SEEK_PROXY_MAX_MB`; `0` turns it off.
 pub fn seek_emulation_limit() -> Option<u64> {
-    match std::env::var("MOVIEBOX_SEEK_PROXY_MAX_MB")
+    match crate::env_vars::var("MOVIEBOX_SEEK_PROXY_MAX_MB")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
@@ -164,7 +164,7 @@ const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 
 /// Longest startup wait for an end-of-file read, from `MOVIEBOX_SEEK_PROXY_END_WAIT_SECS`.
 fn end_probe_wait() -> Duration {
-    let secs = std::env::var("MOVIEBOX_SEEK_PROXY_END_WAIT_SECS")
+    let secs = crate::env_vars::var("MOVIEBOX_SEEK_PROXY_END_WAIT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_END_PROBE_WAIT_SECS);

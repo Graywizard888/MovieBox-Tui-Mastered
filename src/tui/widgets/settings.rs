@@ -13,6 +13,9 @@ use crate::tui::{
     widgets::ModalFrame,
 };
 
+/// Columns the five full tab titles need with their gaps; narrower tab rows use short titles.
+const FULL_TABS_WIDTH: u16 = 66;
+
 pub fn category_tab_rects(
     tabs_area: Rect,
     _basic_terminal: bool,
@@ -20,7 +23,7 @@ pub fn category_tab_rects(
 ) -> Vec<(SettingsCategory, Rect)> {
     let mut results = Vec::new();
     let mut current_x = tabs_area.x;
-    let compact = tabs_area.width < 50;
+    let compact = tabs_area.width < FULL_TABS_WIDTH;
     let gap = if compact { 2 } else { 3 };
 
     for cat in SettingsCategory::ALL {
@@ -74,9 +77,54 @@ pub fn settings_category_tab_at(
     None
 }
 
-pub fn settings_row_rects(popup_area: Rect, category: SettingsCategory) -> Vec<Rect> {
+/// Splits the modal's inner area into tabs, rows and (for Env Variables) the help footer.
+fn category_sections(inner: Rect, category: SettingsCategory) -> (Rect, Rect, Rect) {
+    let footer = category.footer_height() as u16;
+    let constraints = if footer > 0 {
+        [
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(footer),
+        ]
+    } else {
+        [
+            Constraint::Length(2),
+            Constraint::Length(category.row_count() as u16),
+            Constraint::Min(0),
+        ]
+    };
+    let sections = Layout::vertical(constraints).split(inner);
+    (sections[0], sections[1], sections[2])
+}
+
+/// First row shown when only `visible` rows fit: moves `previous` just enough to keep the
+/// selected row on screen, so the list doesn't jump.
+pub fn settings_scroll(
+    category: SettingsCategory,
+    previous: usize,
+    selected: usize,
+    visible: usize,
+) -> usize {
+    let count = category.row_count();
+    if visible == 0 || count <= visible {
+        return 0;
+    }
+    let selected = selected.min(count - 1);
+    previous
+        .clamp(selected.saturating_sub(visible - 1), selected)
+        .min(count - visible)
+}
+
+/// Screen rects of the visible rows; `rects[i]` is row `scroll + i`, where `scroll` is
+/// [`settings_scroll`] for `selected`.
+pub fn settings_row_rects(
+    popup_area: Rect,
+    category: SettingsCategory,
+    previous_scroll: usize,
+    selected: usize,
+) -> (usize, Vec<Rect>) {
     if popup_area.width < 4 || popup_area.height < 4 {
-        return Vec::new();
+        return (0, Vec::new());
     }
     let inner = Rect {
         x: popup_area.x + 1,
@@ -84,47 +132,45 @@ pub fn settings_row_rects(popup_area: Rect, category: SettingsCategory) -> Vec<R
         width: popup_area.width.saturating_sub(2),
         height: popup_area.height.saturating_sub(2),
     };
-    let rows_height = category.row_count() as u16;
-    let sections = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(rows_height),
-        Constraint::Min(0),
-    ])
-    .split(inner);
-    let rows_area = sections[1];
+    let (_, rows_area, _) = category_sections(inner, category);
+    let scroll = settings_scroll(
+        category,
+        previous_scroll,
+        selected,
+        rows_area.height as usize,
+    );
     let card_x = popup_area.x + 2;
     let card_width = popup_area.width.saturating_sub(4);
-    let row_count = category.row_count();
-    let mut rects = Vec::with_capacity(row_count);
-    for i in 0..row_count {
-        let y = rows_area.y + i as u16;
-        if y < rows_area.bottom() {
-            rects.push(Rect {
-                x: card_x,
-                y,
-                width: card_width,
-                height: 1,
-            });
-        }
-    }
-    rects
+    let visible = category
+        .row_count()
+        .saturating_sub(scroll)
+        .min(rows_area.height as usize);
+    let rects = (0..visible)
+        .map(|i| Rect {
+            x: card_x,
+            y: rows_area.y + i as u16,
+            width: card_width,
+            height: 1,
+        })
+        .collect();
+    (scroll, rects)
 }
 
 pub fn settings_row_at(
     popup_area: Rect,
     category: SettingsCategory,
+    previous_scroll: usize,
+    selected: usize,
     col: u16,
     row: u16,
 ) -> Option<usize> {
-    for (idx, rect) in settings_row_rects(popup_area, category)
+    let (scroll, rects) = settings_row_rects(popup_area, category, previous_scroll, selected);
+    rects
         .into_iter()
-        .enumerate()
-    {
-        if row >= rect.y && row < rect.bottom() && col >= rect.x && col < rect.right() {
-            return Some(idx);
-        }
-    }
-    None
+        .position(|rect| {
+            row >= rect.y && row < rect.bottom() && col >= rect.x && col < rect.right()
+        })
+        .map(|idx| scroll + idx)
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
@@ -140,23 +186,19 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) 
         return;
     }
 
-    let rows_height = state.settings_category.row_count() as u16;
-    let sections = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(rows_height),
-        Constraint::Min(0),
-    ])
-    .split(inner);
-
-    render_tabs(frame, sections[0], popup_area, state, theme);
-    render_category_rows(frame, sections[1], popup_area, state, theme);
+    let (tabs_area, rows_area, footer_area) = category_sections(inner, state.settings_category);
+    render_tabs(frame, tabs_area, popup_area, state, theme);
+    render_category_rows(frame, rows_area, popup_area, state, theme);
+    if state.settings_category == SettingsCategory::EnvVars {
+        render_env_footer(frame, footer_area, popup_area, state, theme);
+    }
 }
 
 fn render_tabs(frame: &mut Frame, area: Rect, popup_area: Rect, state: &AppState, theme: &Theme) {
     let mut line0_spans = Vec::new();
     let mut line1_spans = Vec::new();
 
-    let compact = popup_area.width < 56;
+    let compact = popup_area.width.saturating_sub(6) < FULL_TABS_WIDTH;
     for (i, cat) in SettingsCategory::ALL.iter().enumerate() {
         if i > 0 {
             let gap = if compact { "  " } else { "   " };
@@ -228,6 +270,7 @@ fn render_category_rows(
         }
         SettingsCategory::Appearance => render_appearance_settings(frame, rows_area, state, theme),
         SettingsCategory::StorageInfo => render_storage_settings(frame, rows_area, state, theme),
+        SettingsCategory::EnvVars => render_env_settings(frame, rows_area, state, theme),
     }
 }
 fn has_active_settings_popup(state: &AppState) -> bool {
@@ -339,7 +382,7 @@ fn render_row(
 }
 
 fn render_general_settings(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let row_rects = settings_row_rects_in_area(area, 4);
+    let row_rects = settings_row_rects_in_area(area, 3);
     let has_active_popup = has_active_settings_popup(state);
 
     if let Some(&row_area) = row_rects.first() {
@@ -466,60 +509,39 @@ fn render_general_settings(frame: &mut Frame, area: Rect, state: &AppState, them
             state.basic_terminal,
         );
     }
+}
 
-    if let Some(&row_area) = row_rects.get(3) {
-        let is_selected = state.settings_selected_row == 3;
-        let budget = (row_area.width as usize).saturating_sub(24).clamp(10, 60);
-        let value_spans =
-            if let Some(input) = state.settings_text_input.as_ref().filter(|_| is_selected) {
-                let cursor_char = if state.basic_terminal { "_" } else { "▌" };
-                let (before, after) = input.as_str().split_at(input.cursor_byte_offset());
-                // A pasted cookie is long: keep the end, where the cursor is, in view.
-                let visible_before = crate::tui::text::tail_width(before, budget.saturating_sub(2));
-                let after = crate::tui::text::truncate_width(after, 6);
-                if state.basic_terminal {
-                    vec![
-                        Span::styled(visible_before, theme.text),
-                        Span::styled(cursor_char, theme.text.add_modifier(Modifier::BOLD)),
-                        Span::styled(after, theme.text),
-                    ]
-                } else {
-                    let input_bg = theme.surface0_color();
-                    let input_style = Style::default()
-                        .fg(theme
-                            .text
-                            .fg
-                            .unwrap_or(theme.subtext1.fg.unwrap_or(theme.base)))
-                        .bg(input_bg);
-                    let cursor_style = theme.accent.add_modifier(Modifier::BOLD).bg(input_bg);
-                    vec![
-                        Span::styled(visible_before, input_style),
-                        Span::styled(cursor_char, cursor_style),
-                        Span::styled(after, input_style),
-                    ]
-                }
-            } else {
-                let base_style = if has_active_popup {
-                    theme.muted
-                } else if state.basic_terminal {
-                    theme.text_dim
-                } else {
-                    theme.subtext1
-                };
-                toonworld_cookie_summary(budget, base_style, has_active_popup, theme)
-            };
-        render_row(
-            frame,
-            row_area,
-            SettingRow {
-                is_selected,
-                has_active_popup,
-                label: "ToonWorld Cookie",
-                value_spans,
-            },
-            theme,
-            state.basic_terminal,
-        );
+/// An open text field that keeps the cursor end in view, for long pasted values.
+fn tail_input_spans<'a>(
+    input: &'a crate::tui::text::TextInputBuffer,
+    budget: usize,
+    state: &AppState,
+    theme: &Theme,
+) -> Vec<Span<'a>> {
+    let cursor_char = if state.basic_terminal { "_" } else { "▌" };
+    let (before, after) = input.as_str().split_at(input.cursor_byte_offset());
+    let visible_before = crate::tui::text::tail_width(before, budget.saturating_sub(2));
+    let after = crate::tui::text::truncate_width(after, 6);
+    if state.basic_terminal {
+        vec![
+            Span::styled(visible_before, theme.text),
+            Span::styled(cursor_char, theme.text.add_modifier(Modifier::BOLD)),
+            Span::styled(after, theme.text),
+        ]
+    } else {
+        let input_bg = theme.surface0_color();
+        let input_style = Style::default()
+            .fg(theme
+                .text
+                .fg
+                .unwrap_or(theme.subtext1.fg.unwrap_or(theme.base)))
+            .bg(input_bg);
+        let cursor_style = theme.accent.add_modifier(Modifier::BOLD).bg(input_bg);
+        vec![
+            Span::styled(visible_before, input_style),
+            Span::styled(cursor_char, cursor_style),
+            Span::styled(after, input_style),
+        ]
     }
 }
 
@@ -886,6 +908,127 @@ fn render_storage_settings(frame: &mut Frame, area: Rect, state: &AppState, them
     }
 }
 
+/// Label of an Env Variables row: the name without the shared prefix.
+fn env_label(name: &str) -> &str {
+    name.strip_prefix("MOVIEBOX_").unwrap_or(name)
+}
+
+fn render_env_settings(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    use crate::env_vars::{self, SPECS};
+    let has_active_popup = has_active_settings_popup(state);
+    let selected = state.settings_selected_row;
+    let scroll = settings_scroll(
+        SettingsCategory::EnvVars,
+        state.settings_scroll.get(),
+        selected,
+        area.height as usize,
+    );
+    state.settings_scroll.set(scroll);
+    let dim = if has_active_popup {
+        theme.muted
+    } else if state.basic_terminal {
+        theme.text_dim
+    } else {
+        theme.overlay1
+    };
+    let rows = settings_row_rects_in_area(area, SPECS.len().saturating_sub(scroll));
+    for (row_area, (index, spec)) in rows.into_iter().zip(SPECS.iter().enumerate().skip(scroll)) {
+        let is_selected = index == selected;
+        let label = env_label(spec.name);
+        let budget = (row_area.width as usize)
+            .saturating_sub(crate::tui::text::width(label) + 7)
+            .clamp(8, 48);
+        let value_spans =
+            if let Some(input) = state.settings_text_input.as_ref().filter(|_| is_selected) {
+                tail_input_spans(input, budget, state, theme)
+            } else if spec.kind == env_vars::Kind::Cookie {
+                toonworld_cookie_summary(budget, dim, has_active_popup, theme)
+            } else if let Some(shell) = env_vars::shell(spec.name) {
+                let text = format!("shell: {shell}");
+                let style = if has_active_popup || state.basic_terminal {
+                    dim
+                } else {
+                    theme.rating
+                };
+                vec![Span::styled(
+                    crate::tui::text::truncate_middle_width(&text, budget),
+                    style,
+                )]
+            } else if let Some(saved) = env_vars::saved(spec.name) {
+                let style = if has_active_popup {
+                    theme.muted
+                } else if state.basic_terminal {
+                    theme.text.add_modifier(Modifier::BOLD)
+                } else {
+                    theme.accent.add_modifier(Modifier::BOLD)
+                };
+                vec![Span::styled(
+                    crate::tui::text::truncate_middle_width(&saved, budget),
+                    style,
+                )]
+            } else {
+                vec![Span::styled("default", dim)]
+            };
+        render_row(
+            frame,
+            row_area,
+            SettingRow {
+                is_selected,
+                has_active_popup,
+                label,
+                value_spans,
+            },
+            theme,
+            state.basic_terminal,
+        );
+    }
+}
+
+/// Help for the selected variable: what it does, when it applies, and the keys.
+fn render_env_footer(
+    frame: &mut Frame,
+    area: Rect,
+    popup_area: Rect,
+    state: &AppState,
+    theme: &Theme,
+) {
+    use crate::env_vars::{Applies, SPECS};
+    let Some(spec) = SPECS.get(state.settings_selected_row) else {
+        return;
+    };
+    let area = Rect {
+        x: popup_area.x + 4,
+        width: popup_area.width.saturating_sub(8),
+        ..area
+    };
+    let width = area.width as usize;
+    let applies = match spec.applies {
+        Applies::Now => "applies now",
+        Applies::Restart => "applies after restart",
+    };
+    let shell_note = if crate::env_vars::shell(spec.name).is_some() {
+        " · shell value wins"
+    } else {
+        ""
+    };
+    let keys = if state.settings_text_input.is_some() {
+        format!("Enter save · Esc cancel · empty clears · {applies}")
+    } else {
+        format!("Enter edit · d clear · {applies}{shell_note}")
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            crate::tui::text::truncate_width(spec.help, width).into_owned(),
+            theme.subtext1,
+        )),
+        Line::from(Span::styled(
+            crate::tui::text::truncate_width(&keys, width).into_owned(),
+            theme.text_dim,
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn settings_row_rects_in_area(area: Rect, count: usize) -> Vec<Rect> {
     let mut rects = Vec::with_capacity(count);
     for i in 0..count {
@@ -940,6 +1083,92 @@ mod tests {
 
             assert!(rendered.contains("Settings & Preferences"));
             assert!(rendered.contains(cat.title()));
+        }
+    }
+
+    fn render_to_string(terminal: &mut Terminal<TestBackend>, state: &mut AppState) -> String {
+        let theme = Theme::mocha();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw(frame, area, state, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn env_tab_scrolls_to_the_selected_row_and_clicks_map_back() {
+        use crate::env_vars::SPECS;
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        let mut state = AppState {
+            show_settings_popup: true,
+            settings_category: SettingsCategory::EnvVars,
+            settings_selected_row: 0,
+            ..Default::default()
+        };
+        let rendered = render_to_string(&mut terminal, &mut state);
+        assert!(rendered.contains("Env Variables"));
+        assert!(rendered.contains("SEEK_PROXY_MAX_MB"));
+        assert!(rendered.contains("Enter edit"));
+        assert!(!rendered.contains("PREVIOUS_WORKER_URL"));
+
+        let last = SPECS.len() - 1;
+        state.settings_selected_row = last;
+        let rendered = render_to_string(&mut terminal, &mut state);
+        assert!(rendered.contains("PREVIOUS_WORKER_URL"));
+        assert!(!rendered.contains("SEEK_PROXY_MAX_MB"));
+        let scroll = state.settings_scroll.get();
+        assert!(scroll > 0);
+
+        // A click on the first visible row selects the row the list is scrolled to.
+        let popup =
+            overlay::settings_modal_layout(Rect::new(0, 0, 80, 16), SettingsCategory::EnvVars);
+        let (shown_from, rects) =
+            settings_row_rects(popup, SettingsCategory::EnvVars, scroll, last);
+        assert_eq!(shown_from, scroll);
+        assert_eq!(
+            settings_row_at(
+                popup,
+                SettingsCategory::EnvVars,
+                scroll,
+                last,
+                rects[0].x + 2,
+                rects[0].y
+            ),
+            Some(scroll)
+        );
+
+        // Moving up one row inside the window doesn't scroll.
+        state.settings_selected_row = last - 1;
+        render_to_string(&mut terminal, &mut state);
+        assert_eq!(state.settings_scroll.get(), scroll);
+    }
+
+    #[test]
+    fn all_five_tabs_fit_or_use_short_titles() {
+        for width in [60u16, 80, 120] {
+            let area = Rect::new(0, 0, width, 30);
+            let popup = overlay::settings_modal_layout(area, SettingsCategory::General);
+            let tabs = Rect {
+                x: popup.x + 3,
+                y: popup.y + 1,
+                width: popup.width.saturating_sub(6),
+                height: 2,
+            };
+            assert_eq!(
+                category_tab_rects(tabs, false, SettingsCategory::General).len(),
+                5,
+                "width {width}"
+            );
         }
     }
 
@@ -1058,13 +1287,15 @@ mod tests {
             settings_category_tab_at(popup, 19, popup.y + 1, false, SettingsCategory::General);
         assert_eq!(cat_modes, Some(SettingsCategory::ContentModes));
 
-        let row_rects = settings_row_rects(popup, SettingsCategory::General);
-        assert_eq!(row_rects.len(), 4);
+        let (_, row_rects) = settings_row_rects(popup, SettingsCategory::General, 0, 0);
+        assert_eq!(row_rects.len(), 3);
 
-        let clicked_row = settings_row_at(popup, SettingsCategory::General, 40, row_rects[0].y);
+        let clicked_row =
+            settings_row_at(popup, SettingsCategory::General, 0, 0, 40, row_rects[0].y);
         assert_eq!(clicked_row, Some(0));
 
-        let clicked_row1 = settings_row_at(popup, SettingsCategory::General, 40, row_rects[1].y);
+        let clicked_row1 =
+            settings_row_at(popup, SettingsCategory::General, 0, 0, 40, row_rects[1].y);
         assert_eq!(clicked_row1, Some(1));
 
         let compact_popup = Rect::new(2, 2, 54, 16);
@@ -1150,7 +1381,7 @@ mod tests {
         assert!(rendered.contains("Theme"));
 
         let popup = Rect::new(4, 4, 76, 17);
-        let rows = settings_row_rects(popup, SettingsCategory::Appearance);
+        let (_, rows) = settings_row_rects(popup, SettingsCategory::Appearance, 0, 0);
         assert_eq!(rows.len(), 1);
     }
 

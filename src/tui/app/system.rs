@@ -406,10 +406,34 @@ impl App {
                         self.state.dirty = true;
                     }
                 }
-                crate::tui::state::SettingsCategory::StorageInfo => {}
+                crate::tui::state::SettingsCategory::StorageInfo
+                | crate::tui::state::SettingsCategory::EnvVars => {}
             },
 
             Action::SettingsActivateRow => match self.state.settings_category {
+                crate::tui::state::SettingsCategory::EnvVars => {
+                    let row = self.state.settings_selected_row;
+                    let is_cookie = crate::env_vars::SPECS
+                        .get(row)
+                        .is_some_and(|spec| spec.kind == crate::env_vars::Kind::Cookie);
+                    if let Some(input) = self.state.settings_text_input.take() {
+                        if is_cookie {
+                            self.save_toonworld_cookie(input);
+                        } else {
+                            self.save_env_var(row, input);
+                        }
+                    } else if let Some(spec) = crate::env_vars::SPECS.get(row) {
+                        let current = if is_cookie {
+                            crate::providers::toonworld4all::cookie::current()
+                                .map(|saved| saved.value)
+                        } else {
+                            crate::env_vars::saved(spec.name)
+                        }
+                        .unwrap_or_default();
+                        self.state.settings_text_input =
+                            Some(crate::tui::text::TextInputBuffer::from_str(&current));
+                    }
+                }
                 crate::tui::state::SettingsCategory::General => {
                     match self.state.settings_selected_row {
                         0 => {
@@ -473,17 +497,6 @@ impl App {
                                     .download_dir
                                     .as_ref()
                                     .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                self.state.settings_text_input =
-                                    Some(crate::tui::text::TextInputBuffer::from_str(&current));
-                            }
-                        }
-                        3 => {
-                            if let Some(input) = self.state.settings_text_input.take() {
-                                self.save_toonworld_cookie(input);
-                            } else {
-                                let current = crate::providers::toonworld4all::cookie::current()
-                                    .map(|saved| saved.value)
                                     .unwrap_or_default();
                                 self.state.settings_text_input =
                                     Some(crate::tui::text::TextInputBuffer::from_str(&current));
@@ -1018,7 +1031,57 @@ impl App {
         }
     }
 
-    pub(super) fn clear_toonworld_cookie(&mut self) {
+    fn save_env_var(&mut self, row: usize, input: crate::tui::text::TextInputBuffer) {
+        let Some(spec) = crate::env_vars::SPECS.get(row) else {
+            return;
+        };
+        match crate::env_vars::normalize(spec, input.as_str()) {
+            Err(message) => {
+                // Keep what was typed so it can be fixed.
+                self.state.settings_text_input = Some(input);
+                self.state
+                    .notify(NotificationKind::Error, "Env Variables", message);
+            }
+            Ok(value) => self.store_env_var(spec, value.as_deref()),
+        }
+    }
+
+    pub(super) fn clear_env_var(&mut self, row: usize) {
+        match crate::env_vars::SPECS.get(row) {
+            Some(spec) if spec.kind == crate::env_vars::Kind::Cookie => {
+                self.clear_toonworld_cookie();
+            }
+            Some(spec) => self.store_env_var(spec, None),
+            None => {}
+        }
+    }
+
+    fn store_env_var(&mut self, spec: &crate::env_vars::Spec, value: Option<&str>) {
+        if let Err(error) = crate::env_vars::save(spec.name, value) {
+            self.state.notify(
+                NotificationKind::Error,
+                "Env Variables",
+                format!("Could not save {}: {error}", spec.name),
+            );
+            return;
+        }
+        let when = match spec.applies {
+            crate::env_vars::Applies::Now => "now",
+            crate::env_vars::Applies::Restart => "after a restart",
+        };
+        let message = match (value, crate::env_vars::shell(spec.name).is_some()) {
+            (_, true) => format!(
+                "Saved, but {} is set in your shell, which wins for this run.",
+                spec.name
+            ),
+            (Some(value), false) => format!("{} = {value}, applies {when}.", spec.name),
+            (None, false) => format!("{} back to default, applies {when}.", spec.name),
+        };
+        self.state
+            .notify(NotificationKind::Success, "Env Variables", message);
+    }
+
+    fn clear_toonworld_cookie(&mut self) {
         match crate::providers::toonworld4all::cookie::save(None) {
             Ok(_) => self.state.notify(
                 NotificationKind::Success,

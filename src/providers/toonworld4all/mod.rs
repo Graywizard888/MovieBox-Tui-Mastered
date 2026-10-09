@@ -33,11 +33,11 @@ pub struct ToonWorld4AllClient {
 
 impl ToonWorld4AllClient {
     pub fn new() -> Result<Self, ProviderError> {
-        let base =
-            std::env::var("MOVIEBOX_TOONWORLD4ALL_URL").unwrap_or_else(|_| DEFAULT_BASE.into());
-        let archive = std::env::var("MOVIEBOX_TOONWORLD4ALL_ARCHIVE_URL")
+        let base = crate::env_vars::var("MOVIEBOX_TOONWORLD4ALL_URL")
+            .unwrap_or_else(|_| DEFAULT_BASE.into());
+        let archive = crate::env_vars::var("MOVIEBOX_TOONWORLD4ALL_ARCHIVE_URL")
             .unwrap_or_else(|_| DEFAULT_ARCHIVE.into());
-        let worker = std::env::var("MOVIEBOX_TOONWORLD4ALL_WORKER_URL")
+        let worker = crate::env_vars::var("MOVIEBOX_TOONWORLD4ALL_WORKER_URL")
             .unwrap_or_else(|_| DEFAULT_WORKER.into());
         let mut client = Self::with_endpoints(&base, &archive, &worker)?;
         for (key, aliases) in [
@@ -54,7 +54,7 @@ impl ToonWorld4AllClient {
                 &mut client.worker_aliases,
             ),
         ] {
-            if let Ok(previous) = std::env::var(key) {
+            if let Ok(previous) = crate::env_vars::var(key) {
                 aliases.push(site::base_url(&previous)?);
             }
         }
