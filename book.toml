@@ -7,9 +7,9 @@ src = "docs"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/mesamirh/MovieBox-Tui"
-edit-url-template = "https://github.com/mesamirh/MovieBox-Tui/edit/main/{path}"
-site-url = "/MovieBox-Tui/"
+git-repository-url = "https://github.com/Graywizard888/MovieBox-Tui-Mastered"
+edit-url-template = "https://github.com/Graywizard888/MovieBox-Tui-Mastered/edit/main/{path}"
+site-url = "/MovieBox-Tui-Mastered/"
 additional-css = ["docs/custom.css"]
 
 [output.html.fold]
